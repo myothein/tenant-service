@@ -49,3 +49,5 @@ jobs:
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Compile
         run: npm run build
+      - name: API security and transaction unit tests
+        run: npm test
