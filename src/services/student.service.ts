@@ -75,6 +75,7 @@ export function validateStudentRename(value: unknown): StudentRename | null {
  */
 export function studentWriteGate(_req: Request, res: Response, next: NextFunction) {
     if (process.env.TENANT_STUDENT_WRITES_ENABLED !== 'true') {
+        res.setHeader('Allow', 'GET, HEAD');
         return res.status(405).json({ success: false, code: 'STUDENT_WRITES_DISABLED' });
     }
     if (process.env.NODE_ENV === 'production' &&
