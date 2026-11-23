@@ -645,6 +645,20 @@ test('PostgreSQL student writes are exactly-once under retry, concurrency and re
             method: 'DELETE', headers: {...adminHeaders, 'Idempotency-Key': createKey}
         });
         assert.equal(wrongOperation.status, 409, 'A create key cannot delete its result');
+        // Simulate another authenticated principal reusing a known key.
+        await fixture.pool.query(
+            "UPDATE student_write_idempotency SET principal_id='different-test-principal' " +
+            "WHERE tenant_code=$1 AND operation='student.create' AND response_body->>'id'=$2",
+            [tenant, studentId]
+        );
+        const wrongActor = await create();
+        assert.equal(wrongActor.status, 409, 'A replay key is bound to the verified principal');
+        assert.equal(wrongActor.data.code, 'IDEMPOTENCY_KEY_REUSED');
+        await fixture.pool.query(
+            "UPDATE student_write_idempotency SET principal_id='nonproduction-legacy-qa' " +
+            "WHERE tenant_code=$1 AND operation='student.create' AND response_body->>'id'=$2",
+            [tenant, studentId]
+        );
 
         const updateKey = randomUUID();
         const rename = () => api('/students/' + studentId, {
