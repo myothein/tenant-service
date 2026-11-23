@@ -281,3 +281,61 @@ test('PostgreSQL student directory enforces row-level tenant filtering, soft del
         if (gradeIds.length) await pool.query('DELETE FROM grade WHERE id = ANY($1::integer[])', [gradeIds]);
     }
 });
+
+
+test('PostgreSQL student column-privilege role cannot read private columns or mutate students', {
+    skip: process.env.RUN_PG_INTEGRATION !== '1'
+}, async () => {
+    // CI-only synthetic role on disposable PostgreSQL 17, never provisioned in production.
+    const role = 'tenant_ci_student_reader';
+    const password = 'ci-synthetic-student-column-reader-credential';
+    const pool = getTenantPool(tenant);
+    const admin = await pool.connect();
+    let created = false;
+    try {
+        await admin.query(
+            "CREATE ROLE tenant_ci_student_reader LOGIN PASSWORD 'ci-synthetic-student-column-reader-credential' " +
+            'NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS'
+        );
+        created = true;
+        await admin.query('GRANT CONNECT ON DATABASE tenant_ci_qa TO tenant_ci_student_reader');
+        await admin.query('GRANT USAGE ON SCHEMA public TO tenant_ci_student_reader');
+        await admin.query(
+            'GRANT SELECT (id, name, surname, "classId", "gradeId", tenant_code, "deletedAt") ' +
+            'ON TABLE student TO tenant_ci_student_reader'
+        );
+        const reader = new Client({
+            host: '127.0.0.1', port: 5432, database: tenant, user: role, password
+        });
+        try {
+            await reader.connect();
+            // The least-privilege role may execute the precise read-only API query.
+            const rows = await reader.query(
+                'SELECT id, name, surname, "classId", "gradeId" FROM student ' +
+                'WHERE tenant_code = $1 AND "deletedAt" IS NULL LIMIT 1',
+                [tenant]
+            );
+            assert.ok(Array.isArray(rows.rows));
+            // Credential compromise must not grant access to extra student PII.
+            await assert.rejects(() => reader.query('SELECT email FROM student LIMIT 1'), /permission denied/);
+            await assert.rejects(() => reader.query('SELECT birthday FROM student LIMIT 1'), /permission denied/);
+            await assert.rejects(() => reader.query('SELECT * FROM student LIMIT 1'), /permission denied/);
+            await assert.rejects(() => reader.query('DELETE FROM student WHERE false'), /permission denied/);
+        } finally {
+            await reader.end();
+        }
+    } finally {
+        if (created) {
+            await admin.query('REVOKE ALL PRIVILEGES ON TABLE student FROM tenant_ci_student_reader');
+            // Column grants must be explicitly revoked to drop the temporary role.
+            await admin.query(
+                'REVOKE SELECT (id, name, surname, "classId", "gradeId", tenant_code, "deletedAt") ' +
+                'ON TABLE student FROM tenant_ci_student_reader'
+            );
+            await admin.query('REVOKE USAGE ON SCHEMA public FROM tenant_ci_student_reader');
+            await admin.query('REVOKE CONNECT ON DATABASE tenant_ci_qa FROM tenant_ci_student_reader');
+            await admin.query('DROP ROLE tenant_ci_student_reader');
+        }
+        admin.release();
+    }
+});
