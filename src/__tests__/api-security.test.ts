@@ -6,6 +6,7 @@ import { createApp } from '../server';
 import { runInTransaction, resolveTenantDatabaseUrl, assertRuntimeDbRole } from '../lib/db';
 import { validateSubjectName } from '../services/subject.service';
 import { readPage } from '../routes/subject.routes';
+import { readUserPage } from '../routes/user.routes';
 
 type ResponseSnapshot = { status: number; body: any; headers: Headers };
 const adminTestKey = 'admin-development-only-secret-longer-than-thirty-two-bytes';
@@ -119,11 +120,34 @@ test('invalid pagination and invalid subject name rejected', async () => withKey
     assert.equal(name.status, 400);
 }, adminTestKey));
 
-test('unsafe legacy student/user routes cannot read sensitive records', async () => withKeys(async () => {
+test('unaccepted student CRUD remains closed; user listing rejects unbounded query before DB access', async () => withKeys(async () => {
     const headers = { authorization: 'Bearer ' + adminTestKey };
     assert.equal((await request('/students', { headers })).status, 501);
-    assert.equal((await request('/users', { headers })).status, 501);
+    const invalid = await request('/users?page=0&limit=500', { headers });
+    assert.equal(invalid.status, 400);
+    assert.equal(invalid.body.code, 'INVALID_PAGINATION');
+    const headerSpoof = await request('/users?limit=1', {
+        headers: { ...headers, 'x-tenant-id': 'another-school' }
+    });
+    assert.equal(headerSpoof.status, 403);
 }, adminTestKey));
+
+test('user directory requires admin authorization before any database query', async () => withKeys(async () => {
+    const unauthorized = await request('/users?limit=5', {
+        headers: { authorization: 'Bearer invalid-credential' }
+    });
+    assert.equal(unauthorized.status, 401);
+    assert.equal(unauthorized.body.code, 'UNAUTHORIZED');
+}, adminTestKey, agentTestKey));
+
+test('user directory pagination is bounded and rejects ambiguous query types', () => {
+    assert.deepEqual(readUserPage({}), { page: 1, limit: 20, offset: 0 });
+    assert.deepEqual(readUserPage({ page: '3', limit: '5' }), { page: 3, limit: 5, offset: 10 });
+    for (const query of [{page:'0'},{page:'-1'},{page:'1.1'}, {limit:'101'},
+        {limit:'0'}, {limit:'1;SELECT'}, {page: ['1', '2']}, {page:'9999999999'}]) {
+        assert.equal(readUserPage(query), null);
+    }
+});
 
 test('input validation helpers reject out-of-bounds values', () => {
     assert.equal(validateSubjectName(''), false);
