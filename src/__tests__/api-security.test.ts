@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
+import { randomUUID } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import { createApp } from '../server';
 import { runInTransaction, resolveTenantDatabaseUrl, assertRuntimeDbRole } from '../lib/db';
@@ -148,8 +149,21 @@ test('student writes remain disabled; tenant admin listings reject unbounded que
 test('student write opt-in rejects invalid bodies and cross-tenant intent before DB access', async () => withKeys(async () => {
     const before = process.env.TENANT_STUDENT_WRITES_ENABLED;
     process.env.TENANT_STUDENT_WRITES_ENABLED = 'true';
-    const headers = { authorization: 'Bearer ' + adminTestKey, 'content-type': 'application/json' };
+    const headers = {
+        authorization: 'Bearer ' + adminTestKey, 'content-type': 'application/json',
+        'Idempotency-Key': randomUUID()
+    };
     try {
+        const missing = await request('/students', {
+            method: 'POST', headers: { authorization: 'Bearer ' + adminTestKey }
+        });
+        assert.equal(missing.status, 428);
+        assert.equal(missing.body.code, 'IDEMPOTENCY_KEY_REQUIRED');
+        const malformed = await request('/students', {
+            method: 'POST', headers: { ...headers, 'Idempotency-Key': 'aaaaaaaaaaaaaaaa' }
+        });
+        assert.equal(malformed.status, 400);
+        assert.equal(malformed.body.code, 'INVALID_IDEMPOTENCY_KEY');
         const empty = await request('/students', {
             method: 'POST', headers, body: JSON.stringify({ name: 'Synthetic' })
         });
