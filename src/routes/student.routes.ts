@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import { withTenantClient } from '../lib/db';
 import { tenantHandler } from '../utils/tenant-handler';
+import { readStudentId, studentWriteGate, createStudent, updateStudent, deleteStudent } from '../services/student.service';
+export { readStudentId } from '../services/student.service';
 
 const router = Router();
 
@@ -21,17 +23,11 @@ export function readStudentPage(query: Record<string, unknown>) {
     return { page, limit, offset: (page - 1) * limit };
 }
 
-/** A student ID is a server-issued opaque identifier, never an SQL fragment. */
-export function readStudentId(raw: unknown): string | null {
-    if (typeof raw !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(raw)) return null;
-    return raw;
-}
-
 /**
  * Both endpoints are mounted behind verified TENANT_ADMIN OIDC authorization.
  * The fixed tenant DB and tenant_code predicate enforce defense-in-depth scope.
  * Do not return contact, address, DOB, blood type, photo, or other sensitive PII.
- * No student mutations without an accepted write + audit/outbox design.
+ * Mutations require an explicit deployment opt-in and atomic, PII-minimal outbox.
  */
 router.get('/', tenantHandler(async (req, res, next) => {
     try {
@@ -77,6 +73,11 @@ router.get('/:id', tenantHandler(async (req, res, next) => {
         res.json(student);
     } catch (error) { next(error); }
 }));
+
+// Opt-in-only writes use the same verified tenant-admin auth as read endpoints.
+router.post('/', studentWriteGate, createStudent);
+router.put('/:id', studentWriteGate, updateStudent);
+router.delete('/:id', studentWriteGate, deleteStudent);
 
 router.all('*', (_req, res) => {
     res.setHeader('Allow', 'GET, HEAD');
