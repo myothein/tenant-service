@@ -18,7 +18,7 @@ async function api(path: string, opts: RequestInit = {}) {
         if (!address || typeof address === 'string') throw new Error('No test listener');
         const r = await fetch('http://127.0.0.1:' + address.port + path, opts);
         const data = await r.json() as any;
-        return { status: r.status, data };
+        return { status: r.status, data, headers: r.headers };
     } finally {
         await new Promise<void>((resolve, reject) =>
             listener.close(error => error ? reject(error) : resolve())
@@ -574,5 +574,116 @@ test('PostgreSQL student rename and soft-delete roll back if outbox persistence 
         await fixture.pool.query('DELETE FROM grade WHERE id=$1', [fixture.gradeId]);
         if (previous === undefined) delete process.env.TENANT_STUDENT_WRITES_ENABLED;
         else process.env.TENANT_STUDENT_WRITES_ENABLED = previous;
+    }
+});
+
+test('PostgreSQL student writes are exactly-once under retry, concurrency and reused keys', {
+    skip: process.env.RUN_PG_INTEGRATION !== '1'
+}, async () => {
+    process.env.TENANT_ADMIN_API_KEY = admin;
+    process.env.TENANT_AGENT_API_KEY = agent;
+    const oldFlag = process.env.TENANT_STUDENT_WRITES_ENABLED;
+    process.env.TENANT_STUDENT_WRITES_ENABLED = 'true';
+    const fixture = await prepareStudentWriteFixture();
+    let studentId: string | undefined;
+    try {
+        const createKey = randomUUID();
+        const createInput = { username: 'ci-replay-' + fixture.code, name: 'Synthetic',
+            surname: 'Only', address: 'Synthetic address', bloodType: 'O_POS',
+            sex: 'MALE', birthday: '2001-01-01', classId: fixture.classId,
+            gradeId: fixture.gradeId, email: 'synthetic@example.invalid' };
+        const create = () => api('/students', {
+            method: 'POST', headers: {...adminHeaders, 'Idempotency-Key': createKey},
+            body: JSON.stringify(createInput)
+        });
+        const [first, concurrent] = await Promise.all([create(), create()]);
+        assert.equal(first.status, 201, JSON.stringify(first.data));
+        assert.equal(concurrent.status, 201, JSON.stringify(concurrent.data));
+        assert.deepEqual(concurrent.data, first.data);
+        studentId = first.data.id as string;
+        const subsequent = await create();
+        assert.equal(subsequent.status, 201);
+        assert.deepEqual(subsequent.data, first.data);
+        assert.equal(subsequent.headers.get('idempotency-replayed'), 'true');
+        assert.ok(first.headers.get('idempotency-replayed') === 'true' ||
+            concurrent.headers.get('idempotency-replayed') === 'true');
+
+        const diffPayload = await api('/students', {
+            method: 'POST', headers: {...adminHeaders, 'Idempotency-Key': createKey},
+            body: JSON.stringify({...createInput, surname: 'Changed'})
+        });
+        assert.equal(diffPayload.status, 409);
+        assert.equal(diffPayload.data.code, 'IDEMPOTENCY_KEY_REUSED');
+        const wrongOperation = await api('/students/' + studentId, {
+            method: 'DELETE', headers: {...adminHeaders, 'Idempotency-Key': createKey}
+        });
+        assert.equal(wrongOperation.status, 409, 'A create key cannot delete its result');
+
+        const updateKey = randomUUID();
+        const rename = () => api('/students/' + studentId, {
+            method: 'PUT', headers: {...adminHeaders, 'Idempotency-Key': updateKey},
+            body: JSON.stringify({name: 'Updated', surname: 'Synthetic'})
+        });
+        const updated = await rename();
+        const updateRetry = await rename();
+        assert.equal(updated.status, 200);
+        assert.equal(updateRetry.status, 200);
+        assert.equal(updateRetry.headers.get('idempotency-replayed'), 'true');
+        assert.deepEqual(updated.data, updateRetry.data);
+
+        const deleteKey = randomUUID();
+        const remove = () => api('/students/' + studentId, {
+            method: 'DELETE', headers: {...adminHeaders, 'Idempotency-Key': deleteKey}
+        });
+        const deleted = await remove();
+        const deleteRetry = await remove();
+        assert.equal(deleted.status, 200);
+        assert.equal(deleteRetry.status, 200);
+        assert.equal(deleteRetry.headers.get('idempotency-replayed'), 'true');
+        assert.deepEqual(deleted.data, deleteRetry.data);
+        assert.equal((await api('/students/' + studentId, {headers: adminHeaders})).status, 404);
+
+        const domainRows = await fixture.pool.query(
+            'SELECT COUNT(*)::integer AS n FROM student WHERE tenant_code=$1 AND username=$2',
+            [tenant, createInput.username]
+        );
+        assert.equal(domainRows.rows[0].n, 1, 'Concurrent retries must create exactly one student');
+        const eventRows = await fixture.pool.query(
+            'SELECT event_type,payload FROM local_events WHERE tenant_code=$1 AND ' +
+            'aggregate_type=$2 AND aggregate_id=$3',
+            [tenant, 'Student', studentId]
+        );
+        assert.deepEqual(eventRows.rows.map(row => row.event_type).sort(),
+            ['student.created','student.deleted','student.updated']);
+        const ledgers = await fixture.pool.query(
+            'SELECT key_digest,request_digest,response_body,principal_id FROM ' +
+            'student_write_idempotency WHERE tenant_code=$1',
+            [tenant]
+        );
+        assert.equal(ledgers.rowCount, 3, 'Only committed create/update/delete keys are durable');
+        for (const ledger of ledgers.rows) {
+            assert.match(ledger.key_digest, /^[0-9a-f]{64}$/);
+            assert.match(ledger.request_digest, /^[0-9a-f]{64}$/);
+            assert.deepEqual(Object.keys(ledger.response_body).sort(), ['classId','gradeId','id']);
+            assert.equal(ledger.principal_id, 'nonproduction-legacy-qa');
+            assert.ok(!JSON.stringify(ledger).includes(createInput.name));
+            assert.ok(!JSON.stringify(ledger).includes(createInput.email));
+        }
+    } finally {
+        if (studentId) {
+            await fixture.pool.query(
+                "DELETE FROM student_write_idempotency WHERE tenant_code=$1 AND response_body->>'id'=$2",
+                [tenant, studentId]
+            );
+            await fixture.pool.query(
+                'DELETE FROM local_events WHERE tenant_code=$1 AND aggregate_type=$2 AND aggregate_id=$3',
+                [tenant, 'Student', studentId]
+            );
+            await fixture.pool.query('DELETE FROM student WHERE id=$1', [studentId]);
+        }
+        await fixture.pool.query('DELETE FROM "class" WHERE id=$1', [fixture.classId]);
+        await fixture.pool.query('DELETE FROM grade WHERE id=$1', [fixture.gradeId]);
+        if (oldFlag === undefined) delete process.env.TENANT_STUDENT_WRITES_ENABLED;
+        else process.env.TENANT_STUDENT_WRITES_ENABLED = oldFlag;
     }
 });
