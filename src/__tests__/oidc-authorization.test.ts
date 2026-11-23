@@ -34,7 +34,7 @@ test('real RS256 JWKS: enforce issuer, audience, role, tenant and expiry before 
     await once(listener,'listening');
     const a=listener.address();
     if(!a||typeof a==='string')throw Error('No API port');
-    const url='http://127.0.0.1:'+a.port+'/students';
+    const url='http://127.0.0.1:'+a.port+'/students?page=0';
     const send=async(token:string)=>{
         const r=await fetch(url,{headers:{authorization:'Bearer '+token}});
         return {status:r.status,data:await r.json() as {code?:string}};
@@ -46,7 +46,7 @@ test('real RS256 JWKS: enforce issuer, audience, role, tenant and expiry before 
             .setSubject('qa-admin').setExpirationTime(exp).sign(privateKey);
     try{
         const correct=await sign({tenant_id:'school-qa',realm_access:{roles:['TENANT_ADMIN']}});
-        assert.equal((await send(correct)).status,501,'Authorized admin must pass auth middleware');
+        assert.equal((await send(correct)).status,400,'Authorized tenant admin reaches validation before DB access');
         // The new read-only directory must be guarded by the same verified JWT.
         // Invalid pagination is checked before touching any tenant database.
         const directory = async (token: string) => {
