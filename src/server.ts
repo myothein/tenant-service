@@ -5,6 +5,7 @@ import { requireApiRole } from './middleware/api-auth.middleware';
 import { closeAllTenantPools } from './lib/db';
 
 import subjectsRouter from './routes/subject.routes';
+import usersRouter from './routes/user.routes';
 import localEventsRouter from './routes/local-event.routes';
 
 /** Side-effect-free app creation permits isolated API security tests. */
@@ -19,9 +20,12 @@ export function createApp(tenantId: string = process.env.TENANT_ID || '') {
     app.use('/subjects', requireApiRole('admin'), subjectsRouter);
     app.use('/local-events', requireApiRole('agent'), localEventsRouter);
 
-    // Existing students/user handlers are not compatible with db-helper schema or RBAC.
-    // Never expose them until verified contracts, identity and test coverage are complete.
-    app.use(['/students', '/users'], requireApiRole('admin'), (_req, res) => {
+    // User directory is read-only and explicitly projected; authentication is
+    // enforced before any tenant database access. No user mutations are exposed.
+    app.use('/users', requireApiRole('admin'), usersRouter);
+
+    // Student CRUD schema/authorization still lacks acceptance: fail closed.
+    app.use('/students', requireApiRole('admin'), (_req, res) => {
         res.status(501).json({ success: false, code: 'NOT_IMPLEMENTED' });
     });
 
