@@ -206,7 +206,8 @@ test('PostgreSQL user directory is admin-only, bounded, and never SELECT *', {
             headers: adminHeaders,
             body: JSON.stringify({ username: 'unauthorized-create' })
         });
-        assert.equal(creation.status, 404, 'No user mutation endpoint is exposed');
+        assert.equal(creation.status, 405, 'User mutation methods must fail closed');
+        assert.equal(creation.data.code, 'METHOD_NOT_ALLOWED');
     } finally {
         await pool.query('DELETE FROM "user" WHERE id=$1', [id]);
     }
