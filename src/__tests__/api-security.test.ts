@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import type { PoolClient } from 'pg';
 import { createApp } from '../server';
-import { runInTransaction, resolveTenantDatabaseUrl } from '../lib/db';
+import { runInTransaction, resolveTenantDatabaseUrl, assertRuntimeDbRole } from '../lib/db';
 import { validateSubjectName } from '../services/subject.service';
 import { readPage } from '../routes/subject.routes';
 
@@ -193,4 +193,22 @@ test('database URL resolver forbids cross-tenant selection, unverified remote TL
     const secure='postgresql://qa_user:ci_password@db.example:5432/{tenant}?sslmode=verify-full';
     assert.equal(resolveTenantDatabaseUrl(secure,'school-qa'),
         secure.replace('{tenant}','school-qa'));
+});
+
+test('production DB runtime guard rejects privileged DB roles before domain queries',async()=>{
+    const original={env:process.env.NODE_ENV, role:process.env.TENANT_DB_EXPECTED_ROLE};
+    process.env.NODE_ENV='production';
+    process.env.TENANT_DB_EXPECTED_ROLE='qa_runtime';
+    const fake={
+        query:async()=>({rows:[{role_name:'qa_runtime',rolsuper:true,rolcreatedb:false,
+            rolcreaterole:false,rolreplication:false,rolbypassrls:false}]})
+    } as unknown as Pick<PoolClient,'query'>;
+    try {
+        await assert.rejects(()=>assertRuntimeDbRole(fake),/unsafe privileges/);
+    }finally{
+        if(original.env===undefined)delete process.env.NODE_ENV;
+        else process.env.NODE_ENV=original.env;
+        if(original.role===undefined)delete process.env.TENANT_DB_EXPECTED_ROLE;
+        else process.env.TENANT_DB_EXPECTED_ROLE=original.role;
+    }
 });

@@ -86,12 +86,33 @@ export function getTenantPool(tenantName: string): pg.Pool {
     return pool;
 }
 
+/** Reject privileged DBA credentials when running tenant-service in production. */
+export async function assertRuntimeDbRole(client: Pick<pg.PoolClient, 'query'>): Promise<void> {
+    if (process.env.NODE_ENV !== 'production') return;
+    const expected=process.env.TENANT_DB_EXPECTED_ROLE;
+    if(!expected || !/^[a-z_][a-z0-9_]{0,62}$/.test(expected)){
+        throw new Error('Production tenant DB role not configured');
+    }
+    const result=await client.query<{
+        role_name:string;rolsuper:boolean;rolcreatedb:boolean;
+        rolcreaterole:boolean;rolreplication:boolean;rolbypassrls:boolean;
+    }>(`SELECT current_user AS role_name,
+        rolsuper,rolcreatedb,rolcreaterole,rolreplication,rolbypassrls
+        FROM pg_roles WHERE rolname=current_user`);
+    const role=result.rows[0];
+    if (!role || role.role_name !== expected || role.rolsuper || role.rolcreatedb ||
+        role.rolcreaterole || role.rolreplication || role.rolbypassrls) {
+        throw new Error('Tenant database login has unsafe privileges');
+    }
+}
+
 export async function withTenantClient<T>(
     tenantName: string,
     fn: (client: pg.PoolClient) => Promise<T>
 ): Promise<T> {
     const client = await getTenantPool(tenantName).connect();
     try {
+        await assertRuntimeDbRole(client);
         return await fn(client);
     } finally {
         client.release();

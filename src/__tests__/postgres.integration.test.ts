@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { createApp } from '../server';
-import { getTenantPool } from '../lib/db';
+import { getTenantPool, assertRuntimeDbRole } from '../lib/db';
 
 const tenant = 'tenant_ci_qa';
 const admin = 'ci-only-admin-credential-longer-than-32-bytes';
@@ -106,5 +106,24 @@ test('PostgreSQL transactional rollback: failed outbox insert cannot commit subj
         assert.equal(count.rows[0].count, 0, 'A failed outbox insert must roll back the domain write');
     } finally {
         await pool.query('ALTER TABLE local_events DROP CONSTRAINT IF EXISTS ci_reject_created_event');
+    }
+});
+
+test('PostgreSQL 17 production database role gate rejects actual superuser', {
+    skip:process.env.RUN_PG_INTEGRATION !== '1'
+},async()=>{
+    const pool=getTenantPool(tenant);
+    const client=await pool.connect();
+    const original={env:process.env.NODE_ENV,expected:process.env.TENANT_DB_EXPECTED_ROLE};
+    process.env.NODE_ENV='production';
+    process.env.TENANT_DB_EXPECTED_ROLE='ci_qa';
+    try {
+        await assert.rejects(()=>assertRuntimeDbRole(client),/unsafe privileges/);
+    }finally{
+        client.release();
+        if(original.env===undefined)delete process.env.NODE_ENV;
+        else process.env.NODE_ENV=original.env;
+        if(original.expected===undefined)delete process.env.TENANT_DB_EXPECTED_ROLE;
+        else process.env.TENANT_DB_EXPECTED_ROLE=original.expected;
     }
 });
