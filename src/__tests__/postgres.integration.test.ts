@@ -457,6 +457,8 @@ test('PostgreSQL student creation rejects wrong-tenant classes and rolls back on
     process.env.TENANT_STUDENT_WRITES_ENABLED = 'true';
     const fixture = await prepareStudentWriteFixture();
     const username = 'ci-rollback-' + fixture.code;
+    const replayKey = randomUUID();
+    let retryStudentId: string | undefined;
     const input = { username, name: 'Synthetic', surname: 'Rollback',
         address: 'CI fake address', bloodType: 'O_POS', sex: 'FEMALE',
         birthday: '2002-05-07', classId: fixture.classId, gradeId: fixture.gradeId };
@@ -481,7 +483,7 @@ test('PostgreSQL student creation rejects wrong-tenant classes and rolls back on
         );
         constraintCreated = true;
         const failed = await api('/students', {
-            method: 'POST', headers: { ...adminHeaders, 'Idempotency-Key': randomUUID() }, body: JSON.stringify(input)
+            method: 'POST', headers: { ...adminHeaders, 'Idempotency-Key': replayKey }, body: JSON.stringify(input)
         });
         assert.equal(failed.status, 500, JSON.stringify(failed.data));
         const persisted = await fixture.pool.query(
@@ -489,9 +491,34 @@ test('PostgreSQL student creation rejects wrong-tenant classes and rolls back on
             [tenant, username]
         );
         assert.equal(persisted.rows[0].n, 0, 'Student row must roll back with failed event');
+        await fixture.pool.query('ALTER TABLE local_events DROP CONSTRAINT ci_reject_student_event');
+        constraintCreated = false;
+        const retry = await api('/students', {
+            method: 'POST', headers: { ...adminHeaders, 'Idempotency-Key': replayKey },
+            body: JSON.stringify(input)
+        });
+        assert.equal(retry.status, 201, 'Rolled-back key must be reusable for a safe retry');
+        retryStudentId = retry.data.id;
+        const events = await fixture.pool.query(
+            'SELECT COUNT(*)::integer AS n FROM local_events WHERE tenant_code=$1 AND aggregate_type=$2 AND aggregate_id=$3',
+            [tenant, 'Student', retryStudentId]
+        );
+        assert.equal(events.rows[0].n, 1, 'Retry must publish one and only one outbox event');
+
     } finally {
         if (constraintCreated) {
             await fixture.pool.query('ALTER TABLE local_events DROP CONSTRAINT ci_reject_student_event');
+        }
+        if (retryStudentId) {
+            await fixture.pool.query(
+                "DELETE FROM student_write_idempotency WHERE tenant_code=$1 AND response_body->>'id'=$2",
+                [tenant, retryStudentId]
+            );
+            await fixture.pool.query(
+                'DELETE FROM local_events WHERE tenant_code=$1 AND aggregate_type=$2 AND aggregate_id=$3',
+                [tenant, 'Student', retryStudentId]
+            );
+            await fixture.pool.query('DELETE FROM student WHERE id=$1', [retryStudentId]);
         }
         await fixture.pool.query('DELETE FROM "class" WHERE id=$1', [fixture.classId]);
         await fixture.pool.query('DELETE FROM grade WHERE id=$1', [fixture.gradeId]);
