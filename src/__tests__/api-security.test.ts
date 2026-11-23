@@ -8,6 +8,7 @@ import { validateSubjectName } from '../services/subject.service';
 import { readPage } from '../routes/subject.routes';
 import { readUserPage } from '../routes/user.routes';
 import { readStudentPage, readStudentId } from '../routes/student.routes';
+import { validateStudentCreate, validateStudentRename } from '../services/student.service';
 
 type ResponseSnapshot = { status: number; body: any; headers: Headers };
 const adminTestKey = 'admin-development-only-secret-longer-than-thirty-two-bytes';
@@ -131,7 +132,7 @@ test('student writes remain disabled; tenant admin listings reject unbounded que
     assert.equal(malformedStudent.body.code, 'INVALID_STUDENT_ID');
     const deniedStudentWrite = await request('/students', { method: 'POST', headers });
     assert.equal(deniedStudentWrite.status, 405);
-    assert.equal(deniedStudentWrite.body.code, 'METHOD_NOT_ALLOWED');
+    assert.equal(deniedStudentWrite.body.code, 'STUDENT_WRITES_DISABLED');
     const deniedStudentDelete = await request('/students/synthetic-id', { method: 'DELETE', headers });
     assert.equal(deniedStudentDelete.status, 405);
     const invalid = await request('/users?page=0&limit=500', { headers });
@@ -142,6 +143,70 @@ test('student writes remain disabled; tenant admin listings reject unbounded que
         assert.equal(spoof.status, 403);
     }
 }, adminTestKey));
+
+test('student write opt-in rejects invalid bodies and cross-tenant intent before DB access', async () => withKeys(async () => {
+    const before = process.env.TENANT_STUDENT_WRITES_ENABLED;
+    process.env.TENANT_STUDENT_WRITES_ENABLED = 'true';
+    const headers = { authorization: 'Bearer ' + adminTestKey, 'content-type': 'application/json' };
+    try {
+        const empty = await request('/students', {
+            method: 'POST', headers, body: JSON.stringify({ name: 'Synthetic' })
+        });
+        assert.equal(empty.status, 400);
+        assert.equal(empty.body.code, 'INVALID_STUDENT_INPUT');
+
+        const crossTenant = await request('/students', {
+            method: 'POST', headers, body: JSON.stringify({ tenant_code: 'other-school' })
+        });
+        assert.equal(crossTenant.status, 403);
+        assert.equal(crossTenant.body.code, 'TENANT_FORBIDDEN');
+
+        const invalidEdit = await request('/students/test-id', {
+            method: 'PUT', headers, body: JSON.stringify({ name: 'Synthetic', surname: 'QA', email: 'not-allowed' })
+        });
+        assert.equal(invalidEdit.status, 400);
+        assert.equal(invalidEdit.body.code, 'INVALID_STUDENT_INPUT');
+
+        const crossEdit = await request('/students/test-id', {
+            method: 'PUT', headers,
+            body: JSON.stringify({ tenant_code: 'different-school', name: 'Synthetic', surname: 'QA' })
+        });
+        assert.equal(crossEdit.status, 403);
+
+        const crossDelete = await request('/students/test-id', {
+            method: 'DELETE', headers, body: JSON.stringify({ tenant_code: 'different-school' })
+        });
+        assert.equal(crossDelete.status, 403);
+    } finally {
+        if (before === undefined) delete process.env.TENANT_STUDENT_WRITES_ENABLED;
+        else process.env.TENANT_STUDENT_WRITES_ENABLED = before;
+    }
+}, adminTestKey, agentTestKey));
+
+test('student write payload validator disallows unknown fields, invalid class and medical values', () => {
+    const synthetic = {
+        username: 'ci_student', name: 'Synthetic', surname: 'QA', address: 'synthetic',
+        bloodType: 'O_POS', sex: 'MALE', birthday: '2001-01-01', classId: 1, gradeId: 1
+    };
+    assert.deepEqual(validateStudentCreate(synthetic), { ...synthetic, email: null, phone: null });
+    for (const invalid of [
+        { ...synthetic, tenant_code: 'other-school', password: 'not-accepted' },
+        { ...synthetic, bloodType: 'NOT_VALID' },
+        { ...synthetic, sex: 'UNKNOWN' },
+        { ...synthetic, classId: 0 },
+        { ...synthetic, gradeId: -1 },
+        { ...synthetic, birthday: '2099-01-01' },
+        { ...synthetic, birthday: '2026-02-31' },
+        { ...synthetic, address: '' },
+        { ...synthetic, name: '\n' },
+        { ...synthetic, username: '../root' }
+    ]) {
+        assert.equal(validateStudentCreate(invalid), null);
+    }
+    assert.deepEqual(validateStudentRename({name:'Synthetic',surname:'QA'}),
+        {name:'Synthetic',surname:'QA'});
+    assert.equal(validateStudentRename({name:'Synthetic',surname:'QA',bloodType:'A_POS'}), null);
+});
 
 test('student directory requires valid admin role before connecting to tenant DB', async () => withKeys(async () => {
     const denied = await request('/students?page=0', {
