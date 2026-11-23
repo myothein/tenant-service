@@ -48,4 +48,10 @@ router.get('/', tenantHandler(async (req, res, next) => {
     }
 }));
 
+// User mutations require a separate RBAC and audit-logging acceptance gate.
+router.all('*', (_req, res) => {
+    res.setHeader('Allow', 'GET, HEAD');
+    res.status(405).json({ success: false, code: 'METHOD_NOT_ALLOWED' });
+});
+
 export default router;
