@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import type { PoolClient } from 'pg';
 import { createApp } from '../server';
-import { runInTransaction } from '../lib/db';
+import { runInTransaction, resolveTenantDatabaseUrl } from '../lib/db';
 import { validateSubjectName } from '../services/subject.service';
 import { readPage } from '../routes/subject.routes';
 
@@ -172,4 +172,25 @@ test('legacy shared admin key can never be enabled in NODE_ENV=production',async
         restore('node','NODE_ENV');
         restore('key','TENANT_ADMIN_API_KEY');
     }
+});
+
+test('database URL resolver forbids cross-tenant selection, unverified remote TLS and injection',()=>{
+    const local='postgresql://qa_user:ci_password@127.0.0.1:5432/{tenant}';
+    assert.equal(resolveTenantDatabaseUrl(local,'school-qa'),
+        'postgresql://qa_user:ci_password@127.0.0.1:5432/school-qa');
+    assert.throws(()=>resolveTenantDatabaseUrl(local,'../../postgres'),/Invalid configured tenant/);
+    assert.throws(()=>resolveTenantDatabaseUrl(
+        'postgresql://qa_user:ci_password@127.0.0.1:5432/postgres','school-qa'),/template|target/);
+    assert.throws(()=>resolveTenantDatabaseUrl(
+        'postgresql://qa_user:ci_password@db.example:5432/{tenant}','school-qa'),/verified TLS/);
+    assert.throws(()=>resolveTenantDatabaseUrl(
+        'postgresql://qa_user:ci_password@db.example:5432/{tenant}?sslmode=disable',
+        'school-qa'),/verified TLS/);
+    assert.throws(()=>resolveTenantDatabaseUrl(local+'?host=evil.example','school-qa'),
+        /Unsafe PostgreSQL connection URL parameters/);
+    assert.throws(()=>resolveTenantDatabaseUrl(local+'?sslmode=disable&sslmode=verify-full','school-qa'),
+        /Unsafe PostgreSQL connection URL parameters/);
+    const secure='postgresql://qa_user:ci_password@db.example:5432/{tenant}?sslmode=verify-full';
+    assert.equal(resolveTenantDatabaseUrl(secure,'school-qa'),
+        secure.replace('{tenant}','school-qa'));
 });

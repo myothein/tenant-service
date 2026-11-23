@@ -14,6 +14,48 @@ function assertTenant(tenantName: string): void {
     }
 }
 
+/**
+ * A deployment may connect to ONE preconfigured tenant DB, never a URL chosen by
+ * request headers, token claims or user-controlled PostgreSQL connection options.
+ */
+export function resolveTenantDatabaseUrl(template: string, tenantName: string): string {
+    assertTenant(tenantName);
+    if (typeof template !== 'string' ||
+        template.split('{tenant}').length !== 2) {
+        throw new Error('Invalid tenant database URL template');
+    }
+    const connectionString=template.replace('{tenant}',tenantName);
+    let parsed: URL;
+    try {parsed=new URL(connectionString);}
+    catch {throw new Error('Invalid tenant database connection URL');}
+    if (!['postgres:', 'postgresql:'].includes(parsed.protocol) ||
+        !parsed.hostname || !parsed.username || !parsed.password || parsed.hash ||
+        decodeURIComponent(parsed.pathname.slice(1)) !== tenantName ||
+        parsed.pathname.includes('/',1)) {
+        throw new Error('Tenant DB URL must target the fixed tenant database');
+    }
+    const allowed=new Set(['sslmode']);
+    for(const key of parsed.searchParams.keys()){
+        if(!allowed.has(key) || parsed.searchParams.getAll(key).length!==1){
+            throw new Error('Unsafe PostgreSQL connection URL parameters');
+        }
+    }
+    const sslmode=parsed.searchParams.get('sslmode');
+    const local=['localhost','127.0.0.1','[::1]'].includes(parsed.hostname);
+    if (!local && sslmode!=='verify-full') {
+        throw new Error('Remote PostgreSQL requires verified TLS');
+    }
+    if (process.env.NODE_ENV==='production') {
+        const expected=process.env.TENANT_DB_EXPECTED_ROLE;
+        if(!expected || !/^[a-z_][a-z0-9_]{0,62}$/.test(expected) ||
+            decodeURIComponent(parsed.username)!==expected ||
+            ['postgres','root','admin'].includes(expected)) {
+            throw new Error('Production tenant DB role is not explicitly validated');
+        }
+    }
+    return connectionString;
+}
+
 function readDbConfig(): DBConfig {
     const template = process.env.TENANT_DATABASE_URL_TEMPLATE;
     if (!template || !template.includes('{tenant}')) {
@@ -31,11 +73,7 @@ export function getTenantPool(tenantName: string): pg.Pool {
     const cached = tenantPools.get(tenantName);
     if (cached) return cached;
     const config = readDbConfig();
-    const connectionString = config.databaseUrlTemplate.replace('{tenant}', tenantName);
-    const parsed = new URL(connectionString);
-    if (!['postgres:', 'postgresql:'].includes(parsed.protocol)) {
-        throw new Error('Configured database URL must be PostgreSQL');
-    }
+    const connectionString = resolveTenantDatabaseUrl(config.databaseUrlTemplate, tenantName);
     const pool = new pg.Pool({
         connectionString, max: config.maxConnections,
         connectionTimeoutMillis: 10_000, idleTimeoutMillis: 30_000

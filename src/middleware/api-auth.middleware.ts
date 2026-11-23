@@ -14,7 +14,8 @@ function safeEndpoint(value: string, label: string): URL {
     if (url.username || url.password || url.search || url.hash ||
         !['http:', 'https:'].includes(url.protocol) ||
         (url.protocol === 'http:' &&
-            !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname))) {
+            (process.env.NODE_ENV === 'production' ||
+                !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)))) {
         throw new Error(label + ' requires HTTPS outside loopback');
     }
     return url;
