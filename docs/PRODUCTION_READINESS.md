@@ -40,4 +40,12 @@ The initial CI jobs check tracked-file hygiene, dependency lockfile presence, cl
 - The legacy **/students remains 501** because the deployed migration uses `student` with `tenant_code`, mandatory identity/class/grade fields and different column naming from the old `students` SQL. Re-enabling it without full schema contract, PII authorization, audit and tests would be unsafe.
 - **Not a production authorization:** Real Keycloak realm/client/tenant role mapping, least-privilege user SELECT grants, audit logging, operational privacy policy and backup/restore acceptance remain OPEN.
 
+### 2026-11-23 — Schema-aligned student read-only directory (Draft PR only)
+
+- **GET /students** and **GET /students/:id** now use the actual db-helper PostgreSQL `student` table; requests cannot choose a different tenant and every SQL query includes the fixed `tenant_code` predicate and excludes `"deletedAt"` soft-deleted records.
+- Only `id`, `name`, `surname`, `classId`, and `gradeId` are returned. Address, email, phone, birthday, blood type, sex, photographs, username and any other sensitive fields are not returned; `SELECT *` is prohibited.
+- All student write operations are explicitly refused with HTTP 405 pending a separately accepted write/transaction/audit/outbox design. Authorization is the verified tenant-admin gate; pagination and identifiers are bounded before database use.
+- Synthetic negative HTTP/JWT tests and PostgreSQL 17 disposable seed-and-delete regression tests cover same-DB other-tenant rows, soft deletes, field projection, missing credentials, tenant spoofing and disabled mutations.
+- Production rollout remains blocked on **real Keycloak role mapping, least-privilege student SELECT grants, access audit logging, privacy/child-data policy, performance and backup/restore acceptance**. No production personal information was queried or modified.
+
 **Remaining NO-GO:** actual Keycloak integration, least-privilege DB grants/backup, user- and agent-side RBAC audit, secret rotation, student/user modules, six-repository acceptance, offline recovery under power loss and explicit release approval.
