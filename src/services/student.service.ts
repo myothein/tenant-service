@@ -145,8 +145,12 @@ export const createStudent = tenantHandler(async (req, res, next) => {
         res.status(400).json({ success: false, code: 'INVALID_STUDENT_INPUT' }); return;
     }
     try {
-        const result = await withTenantClient(req.tenantId, client =>
-            runInTransaction(client, async (): Promise<CreateResult> => {
+        const execution = await withTenantClient(req.tenantId, client =>
+            runInTransaction(client, () => runStudentWriteOnce(client, {
+                tenant: req.tenantId, actor: auditActor(res), rawKey: idempotencyKey(res),
+                operation: 'student.create', resource: 'collection',
+                normalizedBody: input, status: 201
+            }, async (): Promise<CreateResult> => {
                 const group = await client.query(
                     'SELECT c.id FROM "class" c JOIN grade g ON g.id=c."gradeId" ' +
                     'AND g.tenant_code=c.tenant_code WHERE c.id=$1 AND g.id=$2 ' +
@@ -167,8 +171,10 @@ export const createStudent = tenantHandler(async (req, res, next) => {
                 const student = created.rows[0];
                 await writeStudentEvent(client, req.tenantId, 'created', student, auditActor(res));
                 return { kind: 'ok', student };
-            })
+            }))
         );
+        const result = execution.result;
+        if (execution.replayed) res.setHeader('Idempotency-Replayed', 'true');
         if (result.kind === 'invalid_class') {
             res.status(422).json({ success: false, code: 'STUDENT_CLASS_GRADE_MISMATCH' }); return;
         }
@@ -189,8 +195,12 @@ export const updateStudent = tenantHandler(async (req, res, next) => {
         res.status(400).json({ success: false, code: 'INVALID_STUDENT_INPUT' }); return;
     }
     try {
-        const result = await withTenantClient(req.tenantId, client =>
-            runInTransaction(client, async (): Promise<ExistingResult> => {
+        const execution = await withTenantClient(req.tenantId, client =>
+            runInTransaction(client, () => runStudentWriteOnce(client, {
+                tenant: req.tenantId, actor: auditActor(res), rawKey: idempotencyKey(res),
+                operation: 'student.update', resource: id,
+                normalizedBody: input, status: 200
+            }, async (): Promise<ExistingResult> => {
                 const updated = await client.query<StudentView>(
                     'UPDATE student SET name=$1,surname=$2,"updatedAt"=NOW() ' +
                     'WHERE id=$3 AND tenant_code=$4 AND "deletedAt" IS NULL ' +
@@ -200,8 +210,10 @@ export const updateStudent = tenantHandler(async (req, res, next) => {
                 if (!updated.rows[0]) return { kind: 'not_found' };
                 await writeStudentEvent(client, req.tenantId, 'updated', updated.rows[0], auditActor(res));
                 return { kind: 'ok', student: updated.rows[0] };
-            })
+            }))
         );
+        const result = execution.result;
+        if (execution.replayed) res.setHeader('Idempotency-Replayed', 'true');
         if (result.kind === 'not_found') {
             res.status(404).json({ success: false, code: 'STUDENT_NOT_FOUND' }); return;
         }
@@ -219,8 +231,12 @@ export const deleteStudent = tenantHandler(async (req, res, next) => {
         res.status(403).json({ success: false, code: 'TENANT_FORBIDDEN' }); return;
     }
     try {
-        const result = await withTenantClient(req.tenantId, client =>
-            runInTransaction(client, async (): Promise<ExistingResult> => {
+        const execution = await withTenantClient(req.tenantId, client =>
+            runInTransaction(client, () => runStudentWriteOnce(client, {
+                tenant: req.tenantId, actor: auditActor(res), rawKey: idempotencyKey(res),
+                operation: 'student.delete', resource: id,
+                normalizedBody: {}, status: 200
+            }, async (): Promise<ExistingResult> => {
                 const deleted = await client.query<StudentView>(
                     'UPDATE student SET "deletedAt"=NOW(),"updatedAt"=NOW() ' +
                     'WHERE id=$1 AND tenant_code=$2 AND "deletedAt" IS NULL ' +
@@ -230,8 +246,10 @@ export const deleteStudent = tenantHandler(async (req, res, next) => {
                 if (!deleted.rows[0]) return { kind: 'not_found' };
                 await writeStudentEvent(client, req.tenantId, 'deleted', deleted.rows[0], auditActor(res));
                 return { kind: 'ok', student: deleted.rows[0] };
-            })
+            }))
         );
+        const result = execution.result;
+        if (execution.replayed) res.setHeader('Idempotency-Replayed', 'true');
         if (result.kind === 'not_found') {
             res.status(404).json({ success: false, code: 'STUDENT_NOT_FOUND' }); return;
         }
