@@ -374,7 +374,7 @@ test('PostgreSQL student writes create, rename and soft-delete with PII-minimal 
             classId: fixture.classId, gradeId: fixture.gradeId,
             email: 'synthetic@example.invalid', phone: '+100000000' };
         const created = await api('/students', {
-            method: 'POST', headers: adminHeaders, body: JSON.stringify(input)
+            method: 'POST', headers: { ...adminHeaders, 'Idempotency-Key': randomUUID() }, body: JSON.stringify(input)
         });
         assert.equal(created.status, 201, JSON.stringify(created.data));
         studentId = created.data.id;
@@ -403,13 +403,13 @@ test('PostgreSQL student writes create, rename and soft-delete with PII-minimal 
         assert.ok(!JSON.stringify(originalEvents.rows[0]).includes('synthetic@example.invalid'));
 
         const updated = await api('/students/' + studentId, {
-            method: 'PUT', headers: adminHeaders,
+            method: 'PUT', headers: { ...adminHeaders, 'Idempotency-Key': randomUUID() },
             body: JSON.stringify({ name: 'Updated', surname: 'Synthetic' })
         });
         assert.equal(updated.status, 200, JSON.stringify(updated.data));
         assert.equal(updated.data.name, 'Updated');
         const softDeleted = await api('/students/' + studentId, {
-            method: 'DELETE', headers: adminHeaders
+            method: 'DELETE', headers: { ...adminHeaders, 'Idempotency-Key': randomUUID() }
         });
         assert.equal(softDeleted.status, 200, JSON.stringify(softDeleted.data));
         const hidden = await api('/students/' + studentId, { headers: adminHeaders });
@@ -453,14 +453,14 @@ test('PostgreSQL student creation rejects wrong-tenant classes and rolls back on
     let constraintCreated = false;
     try {
         const wrongClass = await api('/students', {
-            method: 'POST', headers: adminHeaders,
+            method: 'POST', headers: { ...adminHeaders, 'Idempotency-Key': randomUUID() },
             body: JSON.stringify({ ...input, gradeId: fixture.gradeId + 999 })
         });
         assert.equal(wrongClass.status, 422);
         assert.equal(wrongClass.data.code, 'STUDENT_CLASS_GRADE_MISMATCH');
 
         const anotherTenant = await api('/students', {
-            method: 'POST', headers: adminHeaders,
+            method: 'POST', headers: { ...adminHeaders, 'Idempotency-Key': randomUUID() },
             body: JSON.stringify({ ...input, tenant_code: 'foreign-school' })
         });
         assert.equal(anotherTenant.status, 403);
@@ -471,7 +471,7 @@ test('PostgreSQL student creation rejects wrong-tenant classes and rolls back on
         );
         constraintCreated = true;
         const failed = await api('/students', {
-            method: 'POST', headers: adminHeaders, body: JSON.stringify(input)
+            method: 'POST', headers: { ...adminHeaders, 'Idempotency-Key': randomUUID() }, body: JSON.stringify(input)
         });
         assert.equal(failed.status, 500, JSON.stringify(failed.data));
         const persisted = await fixture.pool.query(
@@ -516,7 +516,7 @@ test('PostgreSQL student rename and soft-delete roll back if outbox persistence 
         );
         pendingConstraint = 'ci_block_student_updated';
         const rejectedUpdate = await api('/students/' + studentId, {
-            method: 'PUT', headers: adminHeaders,
+            method: 'PUT', headers: { ...adminHeaders, 'Idempotency-Key': randomUUID() },
             body: JSON.stringify({name: 'ShouldNotPersist', surname: 'Rollback'})
         });
         assert.equal(rejectedUpdate.status, 500);
@@ -535,7 +535,7 @@ test('PostgreSQL student rename and soft-delete roll back if outbox persistence 
         );
         pendingConstraint = 'ci_block_student_deleted';
         const rejectedDelete = await api('/students/' + studentId, {
-            method: 'DELETE', headers: adminHeaders
+            method: 'DELETE', headers: { ...adminHeaders, 'Idempotency-Key': randomUUID() }
         });
         assert.equal(rejectedDelete.status, 500);
         const stillActive = await fixture.pool.query(
