@@ -339,3 +339,153 @@ test('PostgreSQL student column-privilege role cannot read private columns or mu
         admin.release();
     }
 });
+
+
+/** Disposable PostgreSQL fixtures only. No production data or real pupils. */
+async function prepareStudentWriteFixture() {
+    const pool = getTenantPool(tenant);
+    const code = randomUUID();
+    const grade = await pool.query(
+        'INSERT INTO grade (tenant_code, level) VALUES ($1,$2) RETURNING id',
+        [tenant, 920001]
+    );
+    const gradeId = grade.rows[0].id as number;
+    const classroom = await pool.query(
+        'INSERT INTO "class" (tenant_code, name, capacity, "gradeId") ' +
+        'VALUES ($1,$2,$3,$4) RETURNING id',
+        [tenant, 'CI-write-' + code, 30, gradeId]
+    );
+    return { pool, classId: classroom.rows[0].id as number, gradeId, code };
+}
+
+test('PostgreSQL student writes create, rename and soft-delete with PII-minimal atomic outbox', {
+    skip: process.env.RUN_PG_INTEGRATION !== '1'
+}, async () => {
+    process.env.TENANT_ADMIN_API_KEY = admin;
+    process.env.TENANT_AGENT_API_KEY = agent;
+    const priorFlag = process.env.TENANT_STUDENT_WRITES_ENABLED;
+    process.env.TENANT_STUDENT_WRITES_ENABLED = 'true';
+    const fixture = await prepareStudentWriteFixture();
+    let studentId: string | undefined;
+    try {
+        const input = { username: 'ci-write-' + fixture.code, name: 'Synthetic',
+            surname: 'Only', address: 'CI-only synthetic address',
+            bloodType: 'O_POS', sex: 'MALE', birthday: '2001-01-01',
+            classId: fixture.classId, gradeId: fixture.gradeId,
+            email: 'synthetic@example.invalid', phone: '+100000000' };
+        const created = await api('/students', {
+            method: 'POST', headers: adminHeaders, body: JSON.stringify(input)
+        });
+        assert.equal(created.status, 201, JSON.stringify(created.data));
+        studentId = created.data.id;
+        assert.equal(typeof studentId, 'string');
+        assert.deepEqual(Object.keys(created.data).sort(),
+            ['id','name','surname','classId','gradeId'].sort());
+
+        const persisted = await fixture.pool.query(
+            'SELECT tenant_code,username,address,email,"deletedAt" FROM student WHERE id=$1',
+            [studentId]
+        );
+        assert.equal(persisted.rowCount, 1);
+        assert.equal(persisted.rows[0].tenant_code, tenant);
+        assert.equal(persisted.rows[0].email, input.email);
+        const originalEvents = await fixture.pool.query(
+            'SELECT event_type,payload,headers FROM local_events WHERE tenant_code=$1 ' +
+            'AND aggregate_type=$2 AND aggregate_id=$3',
+            [tenant, 'Student', studentId]
+        );
+        assert.equal(originalEvents.rowCount, 1);
+        assert.equal(originalEvents.rows[0].event_type, 'student.created');
+        assert.deepEqual(Object.keys(originalEvents.rows[0].payload).sort(),
+            ['student_id','tenant_code','class_id','grade_id'].sort());
+        assert.equal(originalEvents.rows[0].payload.student_id, studentId);
+        assert.equal(originalEvents.rows[0].headers.actor_subject, 'nonproduction-legacy-qa');
+        assert.ok(!JSON.stringify(originalEvents.rows[0]).includes('synthetic@example.invalid'));
+
+        const updated = await api('/students/' + studentId, {
+            method: 'PUT', headers: adminHeaders,
+            body: JSON.stringify({ name: 'Updated', surname: 'Synthetic' })
+        });
+        assert.equal(updated.status, 200, JSON.stringify(updated.data));
+        assert.equal(updated.data.name, 'Updated');
+        const softDeleted = await api('/students/' + studentId, {
+            method: 'DELETE', headers: adminHeaders
+        });
+        assert.equal(softDeleted.status, 200, JSON.stringify(softDeleted.data));
+        const hidden = await api('/students/' + studentId, { headers: adminHeaders });
+        assert.equal(hidden.status, 404, 'Soft-deleted student must not be exposed');
+        const events = await fixture.pool.query(
+            'SELECT event_type,payload,status,sent FROM local_events WHERE tenant_code=$1 ' +
+            'AND aggregate_type=$2 AND aggregate_id=$3',
+            [tenant, 'Student', studentId]
+        );
+        assert.deepEqual(events.rows.map(r => r.event_type).sort(),
+            ['student.created','student.updated','student.deleted']);
+        assert.ok(events.rows.every(r => r.status === 'pending' && r.sent === 0));
+        assert.ok(events.rows.every(r => Object.keys(r.payload).length === 4));
+    } finally {
+        if (studentId) {
+            await fixture.pool.query(
+                'DELETE FROM local_events WHERE aggregate_type=$1 AND aggregate_id=$2 AND tenant_code=$3',
+                ['Student', studentId, tenant]
+            );
+            await fixture.pool.query('DELETE FROM student WHERE id=$1', [studentId]);
+        }
+        await fixture.pool.query('DELETE FROM "class" WHERE id=$1', [fixture.classId]);
+        await fixture.pool.query('DELETE FROM grade WHERE id=$1', [fixture.gradeId]);
+        if (priorFlag === undefined) delete process.env.TENANT_STUDENT_WRITES_ENABLED;
+        else process.env.TENANT_STUDENT_WRITES_ENABLED = priorFlag;
+    }
+});
+
+test('PostgreSQL student creation rejects wrong-tenant classes and rolls back on outbox failure', {
+    skip: process.env.RUN_PG_INTEGRATION !== '1'
+}, async () => {
+    process.env.TENANT_ADMIN_API_KEY = admin;
+    process.env.TENANT_AGENT_API_KEY = agent;
+    const priorFlag = process.env.TENANT_STUDENT_WRITES_ENABLED;
+    process.env.TENANT_STUDENT_WRITES_ENABLED = 'true';
+    const fixture = await prepareStudentWriteFixture();
+    const username = 'ci-rollback-' + fixture.code;
+    const input = { username, name: 'Synthetic', surname: 'Rollback',
+        address: 'CI fake address', bloodType: 'O_POS', sex: 'FEMALE',
+        birthday: '2002-05-07', classId: fixture.classId, gradeId: fixture.gradeId };
+    let constraintCreated = false;
+    try {
+        const wrongClass = await api('/students', {
+            method: 'POST', headers: adminHeaders,
+            body: JSON.stringify({ ...input, gradeId: fixture.gradeId + 999 })
+        });
+        assert.equal(wrongClass.status, 422);
+        assert.equal(wrongClass.data.code, 'STUDENT_CLASS_GRADE_MISMATCH');
+
+        const anotherTenant = await api('/students', {
+            method: 'POST', headers: adminHeaders,
+            body: JSON.stringify({ ...input, tenant_code: 'foreign-school' })
+        });
+        assert.equal(anotherTenant.status, 403);
+
+        await fixture.pool.query(
+            "ALTER TABLE local_events ADD CONSTRAINT ci_reject_student_event " +
+            "CHECK (event_type <> 'student.created') NOT VALID"
+        );
+        constraintCreated = true;
+        const failed = await api('/students', {
+            method: 'POST', headers: adminHeaders, body: JSON.stringify(input)
+        });
+        assert.equal(failed.status, 500, JSON.stringify(failed.data));
+        const persisted = await fixture.pool.query(
+            'SELECT COUNT(*)::integer AS n FROM student WHERE tenant_code=$1 AND username=$2',
+            [tenant, username]
+        );
+        assert.equal(persisted.rows[0].n, 0, 'Student row must roll back with failed event');
+    } finally {
+        if (constraintCreated) {
+            await fixture.pool.query('ALTER TABLE local_events DROP CONSTRAINT ci_reject_student_event');
+        }
+        await fixture.pool.query('DELETE FROM "class" WHERE id=$1', [fixture.classId]);
+        await fixture.pool.query('DELETE FROM grade WHERE id=$1', [fixture.gradeId]);
+        if (priorFlag === undefined) delete process.env.TENANT_STUDENT_WRITES_ENABLED;
+        else process.env.TENANT_STUDENT_WRITES_ENABLED = priorFlag;
+    }
+});
