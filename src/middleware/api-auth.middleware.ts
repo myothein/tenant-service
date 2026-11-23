@@ -50,6 +50,16 @@ function requireMachineKey(role: 'agent' | 'admin', req: Request, res: Response,
     if (!key || Buffer.byteLength(key, 'utf8') < 32) {
         return res.status(503).json({ success:false, code:'AUTH_NOT_CONFIGURED' });
     }
+    // Fail closed on accidental cross-role credential reuse. A compromised
+    // administrator secret must never also authorize durable agent outbox access.
+    const otherKey = process.env[role === 'admin' ? 'TENANT_AGENT_API_KEY' : 'TENANT_ADMIN_API_KEY'];
+    if (otherKey) {
+        const otherBytes = Buffer.from(otherKey, 'utf8');
+        const keyBytes = Buffer.from(key, 'utf8');
+        if (otherBytes.length === keyBytes.length && timingSafeEqual(otherBytes, keyBytes)) {
+            return res.status(503).json({ success:false, code:'AUTH_NOT_CONFIGURED' });
+        }
+    }
     const authorization = req.get('authorization') || '';
     const provided = authorization.startsWith('Bearer ') ? authorization.slice(7) : '';
     const expectedBytes = Buffer.from(key,'utf8');
