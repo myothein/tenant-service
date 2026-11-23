@@ -212,3 +212,72 @@ test('PostgreSQL user directory is admin-only, bounded, and never SELECT *', {
         await pool.query('DELETE FROM "user" WHERE id=$1', [id]);
     }
 });
+
+
+test('PostgreSQL student directory enforces row-level tenant filtering, soft deletes and PII projection', {
+    skip: process.env.RUN_PG_INTEGRATION !== '1'
+}, async () => {
+    process.env.TENANT_ADMIN_API_KEY = admin;
+    process.env.TENANT_AGENT_API_KEY = agent;
+    const pool = getTenantPool(tenant);
+    const otherTenant = 'another-ci-tenant';
+    const ids = [randomUUID(), randomUUID(), randomUUID()];
+    const gradeIds: number[] = [];
+    const classIds: number[] = [];
+    try {
+        for (const [index, tenantCode] of [tenant, otherTenant].entries()) {
+            const grade = await pool.query(
+                'INSERT INTO grade (tenant_code, level) VALUES ($1, $2) RETURNING id',
+                [tenantCode, 900001 + index]
+            );
+            const gradeId = grade.rows[0].id as number;
+            gradeIds.push(gradeId);
+            const classroom = await pool.query(
+                'INSERT INTO "class" (tenant_code, name, capacity, "gradeId") VALUES ($1, $2, $3, $4) RETURNING id',
+                [tenantCode, 'CI-class-' + ids[index], 30, gradeId]
+            );
+            classIds.push(classroom.rows[0].id as number);
+        }
+        for (const [index, studentId] of ids.entries()) {
+            const tenantCode = index === 1 ? otherTenant : tenant;
+            const group = index === 1 ? 1 : 0;
+            await pool.query(
+                'INSERT INTO student (id, tenant_code, username, name, surname, address, "bloodType", sex, birthday, "classId", "gradeId", "updatedAt", "deletedAt") ' +
+                'VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), $12)',
+                [studentId, tenantCode, 'ci-student-' + studentId, 'Synthetic', 'QA', 'synthetic-only',
+                    'O_POS', 'MALE', '2001-01-01', classIds[group], gradeIds[group], index === 2 ? new Date() : null]
+            );
+        }
+        const listing = await api('/students?page=1&limit=100', { headers: adminHeaders });
+        assert.equal(listing.status, 200, JSON.stringify(listing.data));
+        assert.equal(listing.data.page, 1);
+        assert.equal(listing.data.limit, 100);
+        const own = listing.data.data.find((student: {id: string}) => student.id === ids[0]);
+        assert.ok(own, 'Own-tenant synthetic student should be listed');
+        assert.deepEqual(Object.keys(own).sort(), ['id', 'name', 'surname', 'classId', 'gradeId'].sort());
+        assert.ok(!listing.data.data.some((student: {id: string}) => student.id === ids[1]),
+            'Another tenant cannot be enumerated even in the same PostgreSQL database');
+        assert.ok(!listing.data.data.some((student: {id: string}) => student.id === ids[2]),
+            'Soft-deleted student cannot be enumerated');
+
+        const detail = await api('/students/' + ids[0], { headers: adminHeaders });
+        assert.equal(detail.status, 200);
+        assert.deepEqual(Object.keys(detail.data).sort(), ['id', 'name', 'surname', 'classId', 'gradeId'].sort());
+        const crossTenant = await api('/students/' + ids[1], { headers: adminHeaders });
+        assert.equal(crossTenant.status, 404);
+        assert.equal(crossTenant.data.code, 'STUDENT_NOT_FOUND');
+        assert.equal((await api('/students/' + ids[2], { headers: adminHeaders })).status, 404);
+
+        assert.equal((await api('/students?page=1&limit=100')).status, 401);
+        assert.equal((await api('/students', {
+            headers: {...adminHeaders, 'x-tenant-code': otherTenant}
+        })).status, 403);
+        const mutate = await api('/students/' + ids[0], { method: 'DELETE', headers: adminHeaders });
+        assert.equal(mutate.status, 405);
+        assert.equal(mutate.data.code, 'METHOD_NOT_ALLOWED');
+    } finally {
+        await pool.query('DELETE FROM student WHERE id = ANY($1::text[])', [ids]);
+        if (classIds.length) await pool.query('DELETE FROM "class" WHERE id = ANY($1::integer[])', [classIds]);
+        if (gradeIds.length) await pool.query('DELETE FROM grade WHERE id = ANY($1::integer[])', [gradeIds]);
+    }
+});
