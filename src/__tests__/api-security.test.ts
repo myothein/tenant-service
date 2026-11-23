@@ -133,6 +133,7 @@ test('student writes remain disabled; tenant admin listings reject unbounded que
     const deniedStudentWrite = await request('/students', { method: 'POST', headers });
     assert.equal(deniedStudentWrite.status, 405);
     assert.equal(deniedStudentWrite.body.code, 'STUDENT_WRITES_DISABLED');
+    assert.equal(deniedStudentWrite.headers.get('allow'), 'GET, HEAD');
     const deniedStudentDelete = await request('/students/synthetic-id', { method: 'DELETE', headers });
     assert.equal(deniedStudentDelete.status, 405);
     const invalid = await request('/users?page=0&limit=500', { headers });
