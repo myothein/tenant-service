@@ -2,7 +2,7 @@
 
 This service is provisioned for **one fixed tenant** via TENANT_ID. The request may not select a tenant using x-tenant-id or x-tenant-code headers. Each tenant must have an isolated database/role and correct schema.
 
-**Auth:** /subjects requires the tenant administrator Bearer API key; /local-events requires the separate tenant agent Bearer API key. Both must be provisioned out of band, at least 32 bytes, and protected in transit. This is an **interim machine credential gate**, not user OIDC, RBAC or mTLS. It must be replaced/reviewed before production.
+**Auth:** /subjects now requires an RS256-signed JWT from TENANT_OIDC_ISSUER and TENANT_OIDC_JWKS_URL (same HTTPS origin outside loopback). The token must have a valid signature, audience TENANT_OIDC_AUDIENCE, expiry, issued-at, subject, tenant_id equal to fixed deployment TENANT_ID, and TENANT_OIDC_REQUIRED_ROLE (default TENANT_ADMIN). Keycloak `realm_access.roles` and top-level `roles` are supported only after cryptographic verification. /local-events retains a **separate temporary agent Bearer API key**; mTLS/rotation are release blockers. Shared admin API key requires explicit TENANT_ADMIN_AUTH_MODE=legacy, TENANT_ALLOW_DEV_API_KEY=true, and is **forbidden** with NODE_ENV=production. Never run production in legacy mode.
 
 **Endpoints:** GET /health public liveness; /subjects (list/create/update/delete) tenant-scoped; GET /local-events/pending and PATCH /local-events/:id/mark-sent agent-only. /students and /users return 501 even with valid admin credentials because their previous implementations are not schema-valid or sufficiently authorized.
 

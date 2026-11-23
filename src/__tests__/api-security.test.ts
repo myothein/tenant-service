@@ -28,6 +28,12 @@ async function request(path: string, opts: RequestInit = {}): Promise<ResponseSn
 }
 
 async function withKeys(fn: () => Promise<void>, admin?: string, agent?: string) {
+    const previousMode=process.env.TENANT_ADMIN_AUTH_MODE;
+    const previousAllow=process.env.TENANT_ALLOW_DEV_API_KEY;
+    const previousNodeEnv=process.env.NODE_ENV;
+    process.env.TENANT_ADMIN_AUTH_MODE='legacy';
+    process.env.TENANT_ALLOW_DEV_API_KEY='true';
+    process.env.NODE_ENV='test';
     const priorAdmin = process.env.TENANT_ADMIN_API_KEY;
     const priorAgent = process.env.TENANT_AGENT_API_KEY;
     if (admin === undefined) delete process.env.TENANT_ADMIN_API_KEY;
@@ -40,6 +46,12 @@ async function withKeys(fn: () => Promise<void>, admin?: string, agent?: string)
         else process.env.TENANT_ADMIN_API_KEY = priorAdmin;
         if (priorAgent === undefined) delete process.env.TENANT_AGENT_API_KEY;
         else process.env.TENANT_AGENT_API_KEY = priorAgent;
+        if(previousMode===undefined)delete process.env.TENANT_ADMIN_AUTH_MODE;
+        else process.env.TENANT_ADMIN_AUTH_MODE=previousMode;
+        if(previousAllow===undefined)delete process.env.TENANT_ALLOW_DEV_API_KEY;
+        else process.env.TENANT_ALLOW_DEV_API_KEY=previousAllow;
+        if(previousNodeEnv===undefined)delete process.env.NODE_ENV;
+        else process.env.NODE_ENV=previousNodeEnv;
     }
 }
 
@@ -136,4 +148,28 @@ test('domain transaction rolls back if event persistence fails', async () => {
         await fake.query('INSERT EVENT');
     }), /outbox insert failed/);
     assert.deepEqual(sql, ['BEGIN', 'INSERT DOMAIN', 'INSERT EVENT', 'ROLLBACK']);
+});
+
+test('legacy shared admin key can never be enabled in NODE_ENV=production',async()=>{
+    const prev={mode:process.env.TENANT_ADMIN_AUTH_MODE,
+        allow:process.env.TENANT_ALLOW_DEV_API_KEY,node:process.env.NODE_ENV,
+        key:process.env.TENANT_ADMIN_API_KEY};
+    process.env.TENANT_ADMIN_AUTH_MODE='legacy';
+    process.env.TENANT_ALLOW_DEV_API_KEY='true';
+    process.env.NODE_ENV='production';
+    process.env.TENANT_ADMIN_API_KEY=adminTestKey;
+    try {
+        const r=await request('/students',{headers:{authorization:'Bearer '+adminTestKey}});
+        assert.equal(r.status,503);
+        assert.equal(r.body.code,'AUTH_NOT_CONFIGURED');
+    }finally{
+        const restore=(key:keyof typeof prev,envKey:string)=>{
+            const value=prev[key];if(value===undefined)delete process.env[envKey];
+            else process.env[envKey]=value;
+        };
+        restore('mode','TENANT_ADMIN_AUTH_MODE');
+        restore('allow','TENANT_ALLOW_DEV_API_KEY');
+        restore('node','NODE_ENV');
+        restore('key','TENANT_ADMIN_API_KEY');
+    }
 });
