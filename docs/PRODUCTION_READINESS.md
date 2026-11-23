@@ -32,4 +32,12 @@ The initial CI jobs check tracked-file hygiene, dependency lockfile presence, cl
 - Changes are intentionally incompatible with old static-admin-key deployments and unverified DB URL formats. Review environment configuration and client contracts before any merge.
 - Do not deploy `NODE_ENV=production` without a verified HTTPS issuer, trusted JWKS, audience mapper, correctly scoped roles, TLS-enabled tenant DB and least-privileged tenant DB role.
 
+### 2026-11-23 — Tenant-local user directory (Draft PR only)
+
+- Replaced the unsafe `SELECT * FROM user` legacy handler with an **admin-authenticated, read-only GET /users** against the fixed tenant PostgreSQL database. Only explicitly approved non-email account metadata is returned; page and limit are bounded and the query is parameterized.
+- Unauthorized users, mismatched tenant headers, invalid pagination and all user mutation methods fail closed. No user creation, role assignment, identity lifecycle or account secrets have been enabled.
+- Added synthetic auth/validation tests and an ephemeral PostgreSQL 17 integration test that seeds a disposable user row, verifies projected fields, denies mutations and cleans up the row. The private CI still requires owner-approved authentication/cutover.
+- The legacy **/students remains 501** because the deployed migration uses `student` with `tenant_code`, mandatory identity/class/grade fields and different column naming from the old `students` SQL. Re-enabling it without full schema contract, PII authorization, audit and tests would be unsafe.
+- **Not a production authorization:** Real Keycloak realm/client/tenant role mapping, least-privilege user SELECT grants, audit logging, operational privacy policy and backup/restore acceptance remain OPEN.
+
 **Remaining NO-GO:** actual Keycloak integration, least-privilege DB grants/backup, user- and agent-side RBAC audit, secret rotation, student/user modules, six-repository acceptance, offline recovery under power loss and explicit release approval.
