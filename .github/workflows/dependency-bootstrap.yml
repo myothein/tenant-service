@@ -1,0 +1,128 @@
+name: Dependency bootstrap and build diagnostics
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  lockfile-bootstrap:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'hardening/release-security-baseline-20261122' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out only the proposed branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          persist-credentials: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Generate npm lock without running dependency scripts
+        run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+      - name: Commit generated lockfile to draft branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add -- package-lock.json
+          if git diff --cached --quiet; then
+            echo 'No lockfile change'
+            exit 0
+          fi
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'build: lock dependency graph for reproducible CI'
+          git push origin "HEAD:refs/heads/${{ github.head_ref }}"
+  build-smoke:
+    needs: lockfile-bootstrap
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Clean dependency installation without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Compile
+        run: npm run build
+      - name: API security and transaction unit tests
+        run: npm test
+
+  postgresql-contract:
+    needs: lockfile-bootstrap
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      TENANT_ID: tenant_ci_qa
+      TENANT_DATABASE_URL_TEMPLATE: 'postgresql://ci_qa:ci_only_password@127.0.0.1:5432/{tenant}'
+      TENANT_ADMIN_API_KEY: ci-only-admin-credential-longer-than-32-bytes
+      TENANT_AGENT_API_KEY: ci-only-agent-credential-longer-than-32-bytes
+      NODE_ENV: test
+      TENANT_ADMIN_AUTH_MODE: legacy
+      TENANT_ALLOW_DEV_API_KEY: 'true'
+      RUN_PG_INTEGRATION: '1'
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: ci_qa
+          POSTGRES_PASSWORD: ci_only_password
+          POSTGRES_DB: tenant_ci_qa
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci_qa -d tenant_ci_qa"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install locked dependencies (no postinstall scripts)
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Compile tenant-service
+        run: npm run build
+      - name: Checkout audited db-helper migrations at an immutable revision
+        uses: actions/checkout@v4
+        with:
+          repository: myothein/db-helper
+          ref: 7baf9971dd017b6a493f94d4412a1f0a0387f7cb
+          path: integration/db-helper
+          persist-credentials: false
+      - name: Verify audited db-helper revision and stage tenant migrations
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C integration/db-helper rev-parse HEAD)" = '7baf9971dd017b6a493f94d4412a1f0a0387f7cb'
+          mkdir -p /tmp/tenant-qa-migrations
+          cp integration/db-helper/prisma/tenant/migrations/20260106105615_001_tenant_init/migration.sql /tmp/tenant-qa-migrations/001.sql
+          cp integration/db-helper/prisma/tenant/migrations/20260107_add_local_events/migration.sql /tmp/tenant-qa-migrations/002.sql
+          cp integration/db-helper/prisma/tenant/migrations/20261123151000_student_write_idempotency/migration.sql /tmp/tenant-qa-migrations/003.sql
+      - name: Apply SQL to ephemeral PostgreSQL database only
+        shell: bash
+        run: |
+          node <<'NODE'
+          const { Client } = require('pg');
+          const fs = require('fs');
+          (async () => {
+            const db = new Client({ connectionString: process.env.TENANT_DATABASE_URL_TEMPLATE.replace('{tenant}', process.env.TENANT_ID) });
+            await db.connect();
+            try {
+              for (const file of ['/tmp/tenant-qa-migrations/001.sql', '/tmp/tenant-qa-migrations/002.sql', '/tmp/tenant-qa-migrations/003.sql']) {
+                await db.query(fs.readFileSync(file, 'utf8'));
+              }
+            } finally { await db.end(); }
+          })().catch(e => { console.error('Ephemeral migration failed: ' + e.message); process.exitCode = 1; });
+          NODE
+      - name: Verify real PostgreSQL Subject CRUD and atomic outbox
+        run: node --test dist/__tests__/postgres.integration.test.js
