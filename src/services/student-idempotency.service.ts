@@ -46,11 +46,11 @@ export class StudentIdempotencyPending extends Error {
  * a failed domain/outbox write rolls back its ledger reservation, too.
  * HMAC uses the unpublished random client key to avoid storing unhashed PII fingerprints.
  */
-export async function runStudentWriteOnce(
+export async function runStudentWriteOnce<T extends StudentMutationResult>(
     client: PoolClient,
     ctx: ReplayContext,
-    action: () => Promise<StudentMutationResult>
-): Promise<{ result: StudentMutationResult; replayed: boolean }> {
+    action: () => Promise<T>
+): Promise<{ result: T; replayed: boolean }> {
     const keyDigest = createHash('sha256').update(ctx.rawKey, 'utf8').digest('hex');
     const requestDigest = createHmac('sha256', ctx.rawKey)
         .update(JSON.stringify({
@@ -84,7 +84,7 @@ export async function runStudentWriteOnce(
             !Number.isInteger(recorded.response_body.gradeId)) {
             throw new StudentIdempotencyPending();
         }
-        return { result: { kind: 'ok', student: recorded.response_body }, replayed: true };
+        return { result: { kind: 'ok', student: recorded.response_body } as T, replayed: true };
     }
 
     const result = await action();
