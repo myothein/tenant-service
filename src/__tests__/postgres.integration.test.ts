@@ -728,3 +728,73 @@ test('PostgreSQL student writes are exactly-once under retry, concurrency and re
         else process.env.TENANT_STUDENT_WRITES_ENABLED = oldFlag;
     }
 });
+
+test('PostgreSQL outbox acknowledgement retries are idempotent, concurrent and tenant-scoped', {
+    skip: process.env.RUN_PG_INTEGRATION !== '1'
+}, async () => {
+    process.env.TENANT_ADMIN_API_KEY = admin;
+    process.env.TENANT_AGENT_API_KEY = agent;
+    const pool = getTenantPool(tenant);
+    const first = randomUUID();
+    const concurrent = randomUUID();
+    const foreign = randomUUID();
+    const inconsistent = randomUUID();
+    const insert = async (id: string, tenantCode: string) =>
+        pool.query(
+            'INSERT INTO local_events (id,tenant_code,agent_id,aggregate_type,aggregate_id,' +
+            'event_type,payload,created_at,occurred_at) ' +
+            "VALUES ($1,$2,$3,'Synthetic','ci-ack','synthetic.created','{}'::jsonb,NOW(),NOW())",
+            [id, tenantCode, 'ci-agent']
+        );
+    try {
+        await insert(first, tenant);
+        await insert(concurrent, tenant);
+        await insert(foreign, 'another-ci-tenant');
+        await insert(inconsistent, tenant);
+        await pool.query("UPDATE local_events SET status='failed',sent=0 WHERE id=$1", [inconsistent]);
+
+        const ack = (id: string) => api('/local-events/' + id + '/mark-sent', {
+            method: 'PATCH', headers: agentHeaders
+        });
+        const original = await ack(first);
+        assert.equal(original.status, 200, JSON.stringify(original.data));
+        assert.equal(original.data.replayed, false);
+        assert.equal(original.data.event.status, 'sent');
+        assert.equal(original.data.event.sent, 1);
+
+        const retry = await ack(first);
+        assert.equal(retry.status, 200, JSON.stringify(retry.data));
+        assert.equal(retry.data.replayed, true);
+        assert.equal(retry.headers.get('idempotency-replayed'), 'true');
+        assert.deepEqual(retry.data.event, original.data.event);
+
+        const concurrentResponses = await Promise.all([ack(concurrent), ack(concurrent)]);
+        assert.deepEqual(concurrentResponses.map(r => r.status), [200, 200]);
+        assert.deepEqual(
+            concurrentResponses.map(r => r.data.replayed).sort(),
+            [false, true],
+            'Only one concurrent caller changes the state'
+        );
+        const sentRows = await pool.query(
+            'SELECT id,status,sent FROM local_events WHERE id=ANY($1::uuid[])',
+            [[first, concurrent]]
+        );
+        assert.equal(sentRows.rowCount, 2);
+        assert.ok(sentRows.rows.every(row => row.status === 'sent' && row.sent === 1));
+
+        for (const id of [foreign, inconsistent, randomUUID()]) {
+            const rejected = await ack(id);
+            assert.equal(rejected.status, 404, 'Cross-tenant, inconsistent and absent rows must fail closed');
+            assert.equal(rejected.data.code, 'EVENT_NOT_FOUND');
+        }
+        const foreignRow = await pool.query(
+            'SELECT tenant_code,status,sent FROM local_events WHERE id=$1', [foreign]
+        );
+        assert.equal(foreignRow.rows[0].tenant_code, 'another-ci-tenant');
+        assert.equal(foreignRow.rows[0].status, 'pending');
+        assert.equal(foreignRow.rows[0].sent, 0);
+    } finally {
+        await pool.query('DELETE FROM local_events WHERE id=ANY($1::uuid[])',
+            [[first, concurrent, foreign, inconsistent]]);
+    }
+});
