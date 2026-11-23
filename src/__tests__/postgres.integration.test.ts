@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { createApp } from '../server';
+import { Client } from 'pg';
 import { getTenantPool, assertRuntimeDbRole } from '../lib/db';
 
 const tenant = 'tenant_ci_qa';
@@ -125,5 +126,42 @@ test('PostgreSQL 17 production database role gate rejects actual superuser', {
         else process.env.NODE_ENV=original.env;
         if(original.expected===undefined)delete process.env.TENANT_DB_EXPECTED_ROLE;
         else process.env.TENANT_DB_EXPECTED_ROLE=original.expected;
+    }
+});
+
+test('PostgreSQL 17 accepts only dedicated least-privilege tenant runtime role',{
+    skip:process.env.RUN_PG_INTEGRATION !== '1'
+},async()=>{
+    const runtimeRole='tenant_ci_runtime';
+    const password='ci_only_runtime_password_longer_than_32_bytes';
+    const adminPool=getTenantPool(tenant);
+    const admin=await adminPool.connect();
+    try {
+        await admin.query(
+            "CREATE ROLE tenant_ci_runtime LOGIN PASSWORD 'ci_only_runtime_password_longer_than_32_bytes' " +
+            'NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS'
+        );
+        await admin.query('GRANT CONNECT ON DATABASE tenant_ci_qa TO tenant_ci_runtime');
+        await admin.query('GRANT USAGE ON SCHEMA public TO tenant_ci_runtime');
+        await admin.query('GRANT SELECT ON TABLE subject TO tenant_ci_runtime');
+    } finally { admin.release(); }
+    const client=new Client({
+        host:'127.0.0.1',port:5432,user:runtimeRole,password,database:tenant
+    });
+    const original={env:process.env.NODE_ENV,role:process.env.TENANT_DB_EXPECTED_ROLE};
+    try {
+        await client.connect();
+        process.env.NODE_ENV='production';
+        process.env.TENANT_DB_EXPECTED_ROLE=runtimeRole;
+        await assertRuntimeDbRole(client);
+        const result=await client.query('SELECT COUNT(*)::int AS n FROM subject');
+        assert.ok(result.rows[0].n>=0);
+        await assert.rejects(()=>client.query('CREATE ROLE qa_escalated_privileges'),/permission denied/);
+    }finally{
+        await client.end();
+        if(original.env===undefined)delete process.env.NODE_ENV;
+        else process.env.NODE_ENV=original.env;
+        if(original.role===undefined)delete process.env.TENANT_DB_EXPECTED_ROLE;
+        else process.env.TENANT_DB_EXPECTED_ROLE=original.role;
     }
 });
