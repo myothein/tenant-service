@@ -37,3 +37,13 @@ Legacy `TENANT_ADMIN_API_KEY` is for **explicit non-production testing only**, r
 5. Public historical credentials rotation, signed releases, Windows acceptance and owner production approval.
 
 No production deployment, merging or UIMS integration is authorized by this PR.
+
+## Verified 2026-11-23 GitHub Actions evidence
+
+- **Run:** https://github.com/myothein/tenant-service/actions/runs/45087333693
+- **Clean build + API/OIDC/DB validation unit tests:** 16/16 PASS (4 PostgreSQL-only tests skipped in the non-database unit job).
+- **Actual ephemeral PostgreSQL 17:** 4/4 tests PASS, including tenant Subject CRUD + transaction rollback and production role privilege rejection/acceptance.
+- The PostgreSQL tests used a synthetic superuser (`ci_qa`), which the production role guard correctly rejected, and a distinct `tenant_ci_runtime` login, which was accepted after verifying it had no DBA privileges. The test also confirmed the restricted role could not CREATE ROLE.
+- Unit OIDC/JWKS tests generated a disposable RSA signing key and rejected other tenants, expired tokens, invalid issuer/audience and missing admin roles. **No live Keycloak realm, user session or production credentials were used.**
+
+These results certify only the executed CI conditions, not real-world production identity, least-privilege grant matrix under the full application, OIDC key rotation, revocation, service account hardening, throughput or UIMS integration.
