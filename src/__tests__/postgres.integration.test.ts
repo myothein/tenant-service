@@ -489,3 +489,80 @@ test('PostgreSQL student creation rejects wrong-tenant classes and rolls back on
         else process.env.TENANT_STUDENT_WRITES_ENABLED = priorFlag;
     }
 });
+
+
+test('PostgreSQL student rename and soft-delete roll back if outbox persistence fails', {
+    skip: process.env.RUN_PG_INTEGRATION !== '1'
+}, async () => {
+    process.env.TENANT_ADMIN_API_KEY = admin;
+    process.env.TENANT_AGENT_API_KEY = agent;
+    const previous = process.env.TENANT_STUDENT_WRITES_ENABLED;
+    process.env.TENANT_STUDENT_WRITES_ENABLED = 'true';
+    const fixture = await prepareStudentWriteFixture();
+    const studentId = randomUUID();
+    let pendingConstraint: string | null = null;
+    try {
+        await fixture.pool.query(
+            'INSERT INTO student (id,tenant_code,username,name,surname,address,' +
+            '"bloodType",sex,birthday,"classId","gradeId","updatedAt") ' +
+            'VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())',
+            [studentId, tenant, 'ci-existing-' + fixture.code, 'Original', 'Synthetic',
+                'CI-only', 'O_POS', 'MALE', '2001-01-01', fixture.classId, fixture.gradeId]
+        );
+
+        await fixture.pool.query(
+            "ALTER TABLE local_events ADD CONSTRAINT ci_block_student_updated " +
+            "CHECK (event_type <> 'student.updated') NOT VALID"
+        );
+        pendingConstraint = 'ci_block_student_updated';
+        const rejectedUpdate = await api('/students/' + studentId, {
+            method: 'PUT', headers: adminHeaders,
+            body: JSON.stringify({name: 'ShouldNotPersist', surname: 'Rollback'})
+        });
+        assert.equal(rejectedUpdate.status, 500);
+        const unchanged = await fixture.pool.query(
+            'SELECT name,surname FROM student WHERE id=$1 AND tenant_code=$2',
+            [studentId, tenant]
+        );
+        assert.equal(unchanged.rows[0].name, 'Original');
+        assert.equal(unchanged.rows[0].surname, 'Synthetic');
+        await fixture.pool.query('ALTER TABLE local_events DROP CONSTRAINT ci_block_student_updated');
+        pendingConstraint = null;
+
+        await fixture.pool.query(
+            "ALTER TABLE local_events ADD CONSTRAINT ci_block_student_deleted " +
+            "CHECK (event_type <> 'student.deleted') NOT VALID"
+        );
+        pendingConstraint = 'ci_block_student_deleted';
+        const rejectedDelete = await api('/students/' + studentId, {
+            method: 'DELETE', headers: adminHeaders
+        });
+        assert.equal(rejectedDelete.status, 500);
+        const stillActive = await fixture.pool.query(
+            'SELECT "deletedAt" FROM student WHERE id=$1 AND tenant_code=$2',
+            [studentId, tenant]
+        );
+        assert.equal(stillActive.rows[0].deletedAt, null);
+        const persistedEvents = await fixture.pool.query(
+            'SELECT COUNT(*)::integer AS n FROM local_events WHERE aggregate_type=$1 AND aggregate_id=$2',
+            ['Student', studentId]
+        );
+        assert.equal(persistedEvents.rows[0].n, 0, 'No orphan outbox events can survive rollback');
+    } finally {
+        if (pendingConstraint === 'ci_block_student_updated') {
+            await fixture.pool.query('ALTER TABLE local_events DROP CONSTRAINT IF EXISTS ci_block_student_updated');
+        }
+        if (pendingConstraint === 'ci_block_student_deleted') {
+            await fixture.pool.query('ALTER TABLE local_events DROP CONSTRAINT IF EXISTS ci_block_student_deleted');
+        }
+        await fixture.pool.query(
+            'DELETE FROM local_events WHERE aggregate_type=$1 AND aggregate_id=$2',
+            ['Student', studentId]
+        );
+        await fixture.pool.query('DELETE FROM student WHERE id=$1', [studentId]);
+        await fixture.pool.query('DELETE FROM "class" WHERE id=$1', [fixture.classId]);
+        await fixture.pool.query('DELETE FROM grade WHERE id=$1', [fixture.gradeId]);
+        if (previous === undefined) delete process.env.TENANT_STUDENT_WRITES_ENABLED;
+        else process.env.TENANT_STUDENT_WRITES_ENABLED = previous;
+    }
+});
