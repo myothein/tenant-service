@@ -59,6 +59,28 @@ async function withKeys(fn: () => Promise<void>, admin?: string, agent?: string)
     }
 }
 
+test('outbox acknowledgement rejects malformed UUIDs before database access and enforces agent identity', async () => withKeys(async () => {
+    const malformed = ['not-a-uuid', 'a'.repeat(36), '12345678-1234-1234-1234-12345678901Z'];
+    for (const id of malformed) {
+        const response = await request('/local-events/' + id + '/mark-sent', {
+            method: 'PATCH',
+            headers: { authorization: 'Bearer ' + agentTestKey }
+        });
+        assert.equal(response.status, 400);
+        assert.equal(response.body.code, 'INVALID_EVENT_ID');
+    }
+    const id = randomUUID();
+    const unauthorized = await request('/local-events/' + id + '/mark-sent', {
+        method: 'PATCH', headers: { authorization: 'Bearer ' + adminTestKey }
+    });
+    assert.equal(unauthorized.status, 401, 'Admin credential cannot acknowledge an agent event');
+    const spoofed = await request('/local-events/' + id + '/mark-sent', {
+        method: 'PATCH',
+        headers: { authorization: 'Bearer ' + agentTestKey, 'x-tenant-id': 'other-tenant' }
+    });
+    assert.equal(spoofed.status, 403);
+}, adminTestKey, agentTestKey));
+
 test('liveness is non-sensitive', async () => {
     const r = await request('/health');
     assert.equal(r.status, 200);
