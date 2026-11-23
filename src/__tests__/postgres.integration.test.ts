@@ -165,3 +165,49 @@ test('PostgreSQL 17 accepts only dedicated least-privilege tenant runtime role',
         else process.env.TENANT_DB_EXPECTED_ROLE=original.role;
     }
 });
+
+test('PostgreSQL user directory is admin-only, bounded, and never SELECT *', {
+    skip: process.env.RUN_PG_INTEGRATION !== '1'
+}, async () => {
+    process.env.TENANT_ADMIN_API_KEY = admin;
+    process.env.TENANT_AGENT_API_KEY = agent;
+    const id = randomUUID();
+    const username = 'qa-directory-' + id;
+    const pool = getTenantPool(tenant);
+    await pool.query(
+        'INSERT INTO "user" (id, username, first_name, last_name, is_active, created_at, updated_at) ' +
+        'VALUES ($1, $2, $3, $4, TRUE, NOW(), NOW())',
+        [id, username, 'QA', 'Directory']
+    );
+    try {
+        const listed = await api('/users?page=1&limit=100', { headers: adminHeaders });
+        assert.equal(listed.status, 200, JSON.stringify(listed.data));
+        assert.equal(listed.data.page, 1);
+        assert.equal(listed.data.limit, 100);
+        const found = listed.data.data.find((user: { id: string }) => user.id === id);
+        assert.ok(found, 'Inserted user should be in the tenant-local directory');
+        assert.equal(found.username, username);
+        assert.deepEqual(Object.keys(found).sort(), [
+            'id', 'username', 'first_name', 'last_name',
+            'is_active', 'role_id', 'created_at', 'updated_at'
+        ].sort(), 'Only approved fields can leave the tenant DB');
+        assert.equal('email' in found, false);
+
+        const invalid = await api('/users?page=0&limit=500', { headers: adminHeaders });
+        assert.equal(invalid.status, 400);
+        const denied = await api('/users?limit=100');
+        assert.equal(denied.status, 401);
+        const crossTenant = await api('/users', {
+            headers: { ...adminHeaders, 'x-tenant-id': 'another-school' }
+        });
+        assert.equal(crossTenant.status, 403);
+        const creation = await api('/users', {
+            method: 'POST',
+            headers: adminHeaders,
+            body: JSON.stringify({ username: 'unauthorized-create' })
+        });
+        assert.equal(creation.status, 404, 'No user mutation endpoint is exposed');
+    } finally {
+        await pool.query('DELETE FROM "user" WHERE id=$1', [id]);
+    }
+});
