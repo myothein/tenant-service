@@ -96,17 +96,18 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: myothein/db-helper
-          ref: cd99b4508ba4674110484527525ad9b172618b4a
+          ref: 7baf9971dd017b6a493f94d4412a1f0a0387f7cb
           path: integration/db-helper
           persist-credentials: false
       - name: Verify audited db-helper revision and stage tenant migrations
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git -C integration/db-helper rev-parse HEAD)" = 'cd99b4508ba4674110484527525ad9b172618b4a'
+          test "$(git -C integration/db-helper rev-parse HEAD)" = '7baf9971dd017b6a493f94d4412a1f0a0387f7cb'
           mkdir -p /tmp/tenant-qa-migrations
           cp integration/db-helper/prisma/tenant/migrations/20260106105615_001_tenant_init/migration.sql /tmp/tenant-qa-migrations/001.sql
           cp integration/db-helper/prisma/tenant/migrations/20260107_add_local_events/migration.sql /tmp/tenant-qa-migrations/002.sql
+          cp integration/db-helper/prisma/tenant/migrations/20261123151000_student_write_idempotency/migration.sql /tmp/tenant-qa-migrations/003.sql
       - name: Apply SQL to ephemeral PostgreSQL database only
         shell: bash
         run: |
@@ -117,7 +118,7 @@ jobs:
             const db = new Client({ connectionString: process.env.TENANT_DATABASE_URL_TEMPLATE.replace('{tenant}', process.env.TENANT_ID) });
             await db.connect();
             try {
-              for (const file of ['/tmp/tenant-qa-migrations/001.sql', '/tmp/tenant-qa-migrations/002.sql']) {
+              for (const file of ['/tmp/tenant-qa-migrations/001.sql', '/tmp/tenant-qa-migrations/002.sql', '/tmp/tenant-qa-migrations/003.sql']) {
                 await db.query(fs.readFileSync(file, 'utf8'));
               }
             } finally { await db.end(); }
