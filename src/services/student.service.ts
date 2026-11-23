@@ -5,7 +5,7 @@ import { tenantHandler } from '../utils/tenant-handler';
 import { readStudentIdempotencyKey, runStudentWriteOnce,
     StudentIdempotencyConflict, StudentIdempotencyPending } from './student-idempotency.service';
 
-type StudentView = { id: string; name: string; surname: string; classId: number; gradeId: number };
+type StudentView = { id: string; classId: number; gradeId: number };
 type StudentCreate = {
     username: string; name: string; surname: string; address: string;
     bloodType: string; sex: string; birthday: string;
@@ -163,7 +163,7 @@ export const createStudent = tenantHandler(async (req, res, next) => {
                     'INSERT INTO student (id,tenant_code,username,name,surname,email,phone,address,' +
                     '"bloodType",sex,birthday,"classId","gradeId","updatedAt") ' +
                     'VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW()) ' +
-                    'RETURNING id,name,surname,"classId","gradeId"',
+                    'RETURNING id,"classId","gradeId"',
                     [id, req.tenantId, input.username, input.name, input.surname, input.email,
                         input.phone, input.address, input.bloodType, input.sex, input.birthday,
                         input.classId, input.gradeId]
@@ -204,7 +204,7 @@ export const updateStudent = tenantHandler(async (req, res, next) => {
                 const updated = await client.query<StudentView>(
                     'UPDATE student SET name=$1,surname=$2,"updatedAt"=NOW() ' +
                     'WHERE id=$3 AND tenant_code=$4 AND "deletedAt" IS NULL ' +
-                    'RETURNING id,name,surname,"classId","gradeId"',
+                    'RETURNING id,"classId","gradeId"',
                     [input.name, input.surname, id, req.tenantId]
                 );
                 if (!updated.rows[0]) return { kind: 'not_found' };
@@ -240,7 +240,7 @@ export const deleteStudent = tenantHandler(async (req, res, next) => {
                 const deleted = await client.query<StudentView>(
                     'UPDATE student SET "deletedAt"=NOW(),"updatedAt"=NOW() ' +
                     'WHERE id=$1 AND tenant_code=$2 AND "deletedAt" IS NULL ' +
-                    'RETURNING id,name,surname,"classId","gradeId"',
+                    'RETURNING id,"classId","gradeId"',
                     [id, req.tenantId]
                 );
                 if (!deleted.rows[0]) return { kind: 'not_found' };
