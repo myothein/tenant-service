@@ -21,3 +21,15 @@ Do not integrate with UIMS V1 until the six infrastructure repositories pass the
 ## CI verification scope
 
 The initial CI jobs check tracked-file hygiene, dependency lockfile presence, clean npm installation and TypeScript compilation. A successful result **does not** prove authentication, database migrations, offline data safety, functional tests, device integration, signing, or production readiness. Keep the PR as draft until independent release criteria pass.
+
+## Authentication and tenant database safety — Draft QA update (2026-11-23)
+
+- Added RS256 JWT verification against **deployment-pinned OIDC issuer and JWKS URL**, including issuer, audience, expiration, issued-at, subject, fixed tenant ID and required admin role (Keycloak realm roles or top-level roles).
+- OIDC is the **default** for admin CRUD. Shared admin bearer credentials are restricted to explicitly configured `NODE_ENV=test|development`, `TENANT_ALLOW_DEV_API_KEY=true` and `TENANT_ADMIN_AUTH_MODE=legacy`. No legacy shared admin keys in production.
+- Agent outbox endpoints remain separate and still use a temporary 32+ byte machine key. Agent mTLS/workload identity, credential rotation and revocation are still NOT closed.
+- Tenant database connection URLs now require that the resolved database name exactly equals deployment-owned `TENANT_ID`, reject alternate host/query parameters and require verified TLS for non-loopback hosts. Production must explicitly pin `TENANT_DB_EXPECTED_ROLE`.
+- Synthetic local JWKS unit tests use ephemeral RSA keys. Real Keycloak issuer, role mapping, audience mapper, redirect/session policies, and live tenant provisioning were **not** validated; do not infer production readiness from these tests.
+- Changes are intentionally incompatible with old static-admin-key deployments and unverified DB URL formats. Review environment configuration and client contracts before any merge.
+- Do not deploy `NODE_ENV=production` without a verified HTTPS issuer, trusted JWKS, audience mapper, correctly scoped roles, TLS-enabled tenant DB and least-privileged tenant DB role.
+
+**Remaining NO-GO:** actual Keycloak integration, least-privilege DB grants/backup, user- and agent-side RBAC audit, secret rotation, student/user modules, six-repository acceptance, offline recovery under power loss and explicit release approval.
