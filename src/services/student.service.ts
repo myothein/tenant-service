@@ -48,16 +48,17 @@ export function validateStudentCreate(value: unknown): StudentCreate | null {
     const { username, name, surname, address, bloodType, sex, birthday, classId, gradeId, email, phone } = value;
     if (typeof username !== 'string' || !/^[A-Za-z0-9_.-]{1,64}$/.test(username) ||
         !isText(name, 150) || !isText(surname, 150) || !isText(address, 300) ||
-        !['A_POS','A_NEG','B_POS','B_NEG','AB_POS','AB_NEG','O_POS','O_NEG'].includes(String(bloodType)) ||
-        !['MALE','FEMALE'].includes(String(sex)) || !birthDate(birthday) ||
+        typeof bloodType !== 'string' ||
+        !['A_POS','A_NEG','B_POS','B_NEG','AB_POS','AB_NEG','O_POS','O_NEG'].includes(bloodType) ||
+        typeof sex !== 'string' || !['MALE','FEMALE'].includes(sex) || !birthDate(birthday) ||
         !positiveInt(classId) || !positiveInt(gradeId)) return null;
     if (email !== undefined && email !== null &&
         (typeof email !== 'string' || email.length > 254 ||
             !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) return null;
     if (phone !== undefined && phone !== null &&
         (typeof phone !== 'string' || !/^[+0-9() .-]{1,30}$/.test(phone))) return null;
-    return { username, name, surname, address, bloodType: String(bloodType),
-        sex: String(sex), birthday, classId, gradeId,
+    return { username, name, surname, address, bloodType,
+        sex, birthday, classId, gradeId,
         email: typeof email === 'string' ? email : null,
         phone: typeof phone === 'string' ? phone : null };
 }
