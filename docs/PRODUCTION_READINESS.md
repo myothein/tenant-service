@@ -57,3 +57,12 @@ The initial CI jobs check tracked-file hygiene, dependency lockfile presence, cl
 - **Not yet released:** Require independent privacy/security assessment, least-privilege production insert/update/outbox grants, real Keycloak role/subject mapping, audit retention, immutable event delivery/idempotency, PII incident and child-data handling, restore drills, rollback rehearsals and owner approval. Do not enable this flag in production without formal release acceptance.
 
 **Remaining NO-GO:** actual Keycloak integration, least-privilege DB grants/backup, user- and agent-side RBAC audit, secret rotation, student/user modules, six-repository acceptance, offline recovery under power loss and explicit release approval.
+
+
+### 2026-11-23 — Durable exactly-once student mutation replay (Draft only)
+
+- Added an additive **db-helper** migration `20261123151000_student_write_idempotency` and matching Prisma source. In tenant-service, opt-in student mutations require a cryptographically random client `Idempotency-Key`, bind it to fixed tenant, principal, operation, resource and normalized request digest, and atomically persist the response with domain/outbox writes.
+- PostgreSQL unique-key serialization prevents two parallel/retried requests with the same key from creating duplicate students or events; replay returns the accepted status/result and `Idempotency-Replayed: true`. Key misuse returns 409. Missing key 428; malformed/duplicate key 400; replay-incomplete records fail closed.
+- Ledger stores **SHA-256 key digest**, HMAC request digest and minimal opaque identifiers only; no raw key or student names/contacts/medical data. Student identifiers are still pseudonymous data and require access controls, retention and backup protection.
+- Integration tests must confirm serial and concurrent retry, mismatched body/operation, create/update/delete replay, rollback safety, privacy minimization and that only one domain row/event is generated. QA uses synthetic disposable PostgreSQL 17 only.
+- **Still NO-GO:** migration backup/restore and coordinated rollout; independently approved retention; real Keycloak roles/tenant mapping, event delivery acknowledgments, least-privilege PostgreSQL ledger grants, rollback drills and remediation of historical public-repository credentials. Feature flag `TENANT_STUDENT_WRITES_ENABLED` stays unset in production until written approval.
