@@ -76,6 +76,16 @@ test('admin credential does not unlock separate agent endpoint', async () => wit
     assert.equal(r.body.code, 'AUTH_NOT_CONFIGURED');
 }, adminTestKey));
 
+test('identical admin and agent machine credentials fail closed on both roles', async () => withKeys(async () => {
+    const authorization = { authorization: 'Bearer ' + adminTestKey };
+    const agentResponse = await request('/local-events/pending', { headers: authorization });
+    assert.equal(agentResponse.status, 503);
+    assert.equal(agentResponse.body.code, 'AUTH_NOT_CONFIGURED');
+    const adminResponse = await request('/subjects', { headers: authorization });
+    assert.equal(adminResponse.status, 503);
+    assert.equal(adminResponse.body.code, 'AUTH_NOT_CONFIGURED');
+}, adminTestKey, adminTestKey));
+
 test('invalid credential rejected without database connection', async () => withKeys(async () => {
     const r = await request('/subjects', {
         headers: { authorization: 'Bearer not-the-key' }
