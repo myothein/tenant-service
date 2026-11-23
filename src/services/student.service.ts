@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto';
 import type { NextFunction, Request, Response } from 'express';
 import { withTenantClient, runInTransaction } from '../lib/db';
 import { tenantHandler } from '../utils/tenant-handler';
-import { readStudentId } from '../routes/student.routes';
 
 type StudentView = { id: string; name: string; surname: string; classId: number; gradeId: number };
 type StudentCreate = {
@@ -11,8 +10,12 @@ type StudentCreate = {
     classId: number; gradeId: number; email: string | null; phone: string | null;
 };
 type StudentRename = { name: string; surname: string };
-type Mutation = { kind: 'ok'; student: StudentView } | { kind: 'not_found' } | { kind: 'invalid_class' };
+type CreateResult = { kind: 'ok'; student: StudentView } | { kind: 'invalid_class' };
+type ExistingResult = { kind: 'ok'; student: StudentView } | { kind: 'not_found' };
 
+export function readStudentId(raw: unknown): string | null {
+    return typeof raw === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(raw) ? raw : null;
+}
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
     return value !== null && typeof value === 'object' &&
         !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
@@ -122,7 +125,7 @@ export const createStudent = tenantHandler(async (req, res, next) => {
     }
     try {
         const result = await withTenantClient(req.tenantId, client =>
-            runInTransaction(client, async (): Promise<Mutation> => {
+            runInTransaction(client, async (): Promise<CreateResult> => {
                 const group = await client.query(
                     'SELECT c.id FROM "class" c JOIN grade g ON g.id=c."gradeId" ' +
                     'AND g.tenant_code=c.tenant_code WHERE c.id=$1 AND g.id=$2 ' +
@@ -166,7 +169,7 @@ export const updateStudent = tenantHandler(async (req, res, next) => {
     }
     try {
         const result = await withTenantClient(req.tenantId, client =>
-            runInTransaction(client, async (): Promise<Mutation> => {
+            runInTransaction(client, async (): Promise<ExistingResult> => {
                 const updated = await client.query<StudentView>(
                     'UPDATE student SET name=$1,surname=$2,"updatedAt"=NOW() ' +
                     'WHERE id=$3 AND tenant_code=$4 AND "deletedAt" IS NULL ' +
@@ -196,7 +199,7 @@ export const deleteStudent = tenantHandler(async (req, res, next) => {
     }
     try {
         const result = await withTenantClient(req.tenantId, client =>
-            runInTransaction(client, async (): Promise<Mutation> => {
+            runInTransaction(client, async (): Promise<ExistingResult> => {
                 const deleted = await client.query<StudentView>(
                     'UPDATE student SET "deletedAt"=NOW(),"updatedAt"=NOW() ' +
                     'WHERE id=$1 AND tenant_code=$2 AND "deletedAt" IS NULL ' +
