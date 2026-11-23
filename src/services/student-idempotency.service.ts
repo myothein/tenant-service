@@ -3,7 +3,7 @@ import type { Request } from 'express';
 import type { PoolClient } from 'pg';
 
 export type StudentView = {
-    id: string; name: string; surname: string; classId: number; gradeId: number
+    id: string; classId: number; gradeId: number
 };
 export type StudentMutationResult =
     | { kind: 'ok'; student: StudentView }
@@ -78,10 +78,10 @@ export async function runStudentWriteOnce<T extends StudentMutationResult>(
         }
         if (!recorded.response_body ||
             typeof recorded.response_body.id !== 'string' ||
-            typeof recorded.response_body.name !== 'string' ||
-            typeof recorded.response_body.surname !== 'string' ||
-            !Number.isInteger(recorded.response_body.classId) ||
-            !Number.isInteger(recorded.response_body.gradeId)) {
+            !/^[A-Za-z0-9_-]{1,128}$/.test(recorded.response_body.id) ||
+            !Number.isSafeInteger(recorded.response_body.classId) ||
+            !Number.isSafeInteger(recorded.response_body.gradeId) ||
+            Object.keys(recorded.response_body).sort().join(',') !== 'classId,gradeId,id') {
             throw new StudentIdempotencyPending();
         }
         return { result: { kind: 'ok', student: recorded.response_body } as T, replayed: true };
