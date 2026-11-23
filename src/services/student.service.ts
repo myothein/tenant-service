@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import type { NextFunction, Request, Response } from 'express';
 import { withTenantClient, runInTransaction } from '../lib/db';
 import { tenantHandler } from '../utils/tenant-handler';
+import { readStudentIdempotencyKey, runStudentWriteOnce,
+    StudentIdempotencyConflict, StudentIdempotencyPending } from './student-idempotency.service';
 
 type StudentView = { id: string; name: string; surname: string; classId: number; gradeId: number };
 type StudentCreate = {
@@ -73,7 +75,7 @@ export function validateStudentRename(value: unknown): StudentRename | null {
  * additionally requires a signature-verified OIDC subject set by requireApiRole.
  * The legacy QA authentication path can never reach this gate in production.
  */
-export function studentWriteGate(_req: Request, res: Response, next: NextFunction) {
+export function studentWriteGate(req: Request, res: Response, next: NextFunction) {
     if (process.env.TENANT_STUDENT_WRITES_ENABLED !== 'true') {
         res.setHeader('Allow', 'GET, HEAD');
         return res.status(405).json({ success: false, code: 'STUDENT_WRITES_DISABLED' });
@@ -82,7 +84,18 @@ export function studentWriteGate(_req: Request, res: Response, next: NextFunctio
         (typeof res.locals.subject !== 'string' || res.locals.subject.length === 0)) {
         return res.status(403).json({ success: false, code: 'STUDENT_WRITE_IDENTITY_REQUIRED' });
     }
+    if (req.headers['idempotency-key'] === undefined) {
+        return res.status(428).json({ success: false, code: 'IDEMPOTENCY_KEY_REQUIRED' });
+    }
+    const key = readStudentIdempotencyKey(req);
+    if (!key) {
+        return res.status(400).json({ success: false, code: 'INVALID_IDEMPOTENCY_KEY' });
+    }
+    res.locals.studentIdempotencyKey = key;
     next();
+}
+function idempotencyKey(res: Response): string {
+    return res.locals.studentIdempotencyKey as string;
 }
 function auditActor(res: Response): string {
     return typeof res.locals.subject === 'string' && res.locals.subject.length > 0
@@ -105,6 +118,12 @@ async function writeStudentEvent(
     );
 }
 function respondWriteError(error: unknown, res: Response, next: NextFunction) {
+    if (error instanceof StudentIdempotencyConflict) {
+        res.status(409).json({ success: false, code: 'IDEMPOTENCY_KEY_REUSED' }); return;
+    }
+    if (error instanceof StudentIdempotencyPending) {
+        res.status(503).json({ success: false, code: 'IDEMPOTENCY_REPLAY_UNAVAILABLE' }); return;
+    }
     const code = (error as { code?: string })?.code;
     if (code === '23505') {
         res.status(409).json({ success: false, code: 'STUDENT_ALREADY_EXISTS' });
