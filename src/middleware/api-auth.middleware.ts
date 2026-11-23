@@ -41,7 +41,7 @@ function readOidcConfig(): OidcConfig {
 
 function requireMachineKey(role: 'agent' | 'admin', req: Request, res: Response, next: NextFunction) {
     // Admin shared API keys are allowed ONLY in non-production explicit QA mode.
-    if (role === 'admin' && (process.env.NODE_ENV === 'production' ||
+    if (role === 'admin' && (!['test','development'].includes(process.env.NODE_ENV || '') ||
         process.env.TENANT_ALLOW_DEV_API_KEY !== 'true')) {
         return res.status(503).json({success:false,code:'AUTH_NOT_CONFIGURED'});
     }
