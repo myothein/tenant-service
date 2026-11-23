@@ -92,14 +92,21 @@ jobs:
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Compile tenant-service
         run: npm run build
-      - name: Get pinned db-helper schema migrations only (not its environment data)
+      - name: Checkout audited db-helper migrations at an immutable revision
+        uses: actions/checkout@v4
+        with:
+          repository: myothein/db-helper
+          ref: cd99b4508ba4674110484527525ad9b172618b4a
+          path: integration/db-helper
+          persist-credentials: false
+      - name: Verify audited db-helper revision and stage tenant migrations
         shell: bash
         run: |
           set -euo pipefail
+          test "$(git -C integration/db-helper rev-parse HEAD)" = 'cd99b4508ba4674110484527525ad9b172618b4a'
           mkdir -p /tmp/tenant-qa-migrations
-          URL="https://raw.githubusercontent.com/myothein/db-helper/bfae1246e28a43626e00627b9b812af579af4ab3/prisma/tenant/migrations"
-          curl -fsSL --retry 3 "$URL/20260106105615_001_tenant_init/migration.sql" -o /tmp/tenant-qa-migrations/001.sql
-          curl -fsSL --retry 3 "$URL/20260107_add_local_events/migration.sql" -o /tmp/tenant-qa-migrations/002.sql
+          cp integration/db-helper/prisma/tenant/migrations/20260106105615_001_tenant_init/migration.sql /tmp/tenant-qa-migrations/001.sql
+          cp integration/db-helper/prisma/tenant/migrations/20260107_add_local_events/migration.sql /tmp/tenant-qa-migrations/002.sql
       - name: Apply SQL to ephemeral PostgreSQL database only
         shell: bash
         run: |
