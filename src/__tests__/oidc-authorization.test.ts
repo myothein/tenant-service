@@ -47,10 +47,23 @@ test('real RS256 JWKS: enforce issuer, audience, role, tenant and expiry before 
     try{
         const correct=await sign({tenant_id:'school-qa',realm_access:{roles:['TENANT_ADMIN']}});
         assert.equal((await send(correct)).status,501,'Authorized admin must pass auth middleware');
+        // The new read-only directory must be guarded by the same verified JWT.
+        // Invalid pagination is checked before touching any tenant database.
+        const directory = async (token: string) => {
+            const response = await fetch('http://127.0.0.1:' + a.port + '/users?page=0', {
+                headers: { authorization: 'Bearer ' + token }
+            });
+            return { status: response.status, data: await response.json() as any };
+        };
+        assert.deepEqual(await directory(correct), {
+            status:400, data:{ success:false, code:'INVALID_PAGINATION' }
+        });
         const mismatch=await sign({tenant_id:'different-school',realm_access:{roles:['TENANT_ADMIN']}});
         assert.deepEqual(await send(mismatch),{status:403,data:{success:false,code:'TENANT_FORBIDDEN'}});
+        assert.deepEqual(await directory(mismatch),{status:403,data:{success:false,code:'TENANT_FORBIDDEN'}});
         const user=await sign({tenant_id:'school-qa',realm_access:{roles:['STUDENT']}});
         assert.deepEqual(await send(user),{status:403,data:{success:false,code:'ROLE_FORBIDDEN'}});
+        assert.deepEqual(await directory(user),{status:403,data:{success:false,code:'ROLE_FORBIDDEN'}});
         assert.equal((await send(await sign({tenant_id:'school-qa',roles:['TENANT_ADMIN']},issuer,'other-api'))).status,401);
         assert.equal((await send(await sign({tenant_id:'school-qa',roles:['TENANT_ADMIN']},root+'/wrong'))).status,401);
         assert.equal((await send(await sign({tenant_id:'school-qa',roles:['TENANT_ADMIN']},issuer,'tenant-service','-10s'))).status,401);
