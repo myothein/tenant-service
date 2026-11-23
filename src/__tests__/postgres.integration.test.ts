@@ -274,7 +274,7 @@ test('PostgreSQL student directory enforces row-level tenant filtering, soft del
         })).status, 403);
         const mutate = await api('/students/' + ids[0], { method: 'DELETE', headers: adminHeaders });
         assert.equal(mutate.status, 405);
-        assert.equal(mutate.data.code, 'METHOD_NOT_ALLOWED');
+        assert.equal(mutate.data.code, 'STUDENT_WRITES_DISABLED');
     } finally {
         await pool.query('DELETE FROM student WHERE id = ANY($1::text[])', [ids]);
         if (classIds.length) await pool.query('DELETE FROM "class" WHERE id = ANY($1::integer[])', [classIds]);
@@ -420,7 +420,7 @@ test('PostgreSQL student writes create, rename and soft-delete with PII-minimal 
             [tenant, 'Student', studentId]
         );
         assert.deepEqual(events.rows.map(r => r.event_type).sort(),
-            ['student.created','student.updated','student.deleted']);
+            ['student.created','student.deleted','student.updated']);
         assert.ok(events.rows.every(r => r.status === 'pending' && r.sent === 0));
         assert.ok(events.rows.every(r => Object.keys(r.payload).length === 4));
     } finally {
