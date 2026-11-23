@@ -380,7 +380,7 @@ test('PostgreSQL student writes create, rename and soft-delete with PII-minimal 
         studentId = created.data.id;
         assert.equal(typeof studentId, 'string');
         assert.deepEqual(Object.keys(created.data).sort(),
-            ['id','name','surname','classId','gradeId'].sort());
+            ['id','classId','gradeId'].sort());
 
         const persisted = await fixture.pool.query(
             'SELECT tenant_code,username,address,email,"deletedAt" FROM student WHERE id=$1',
@@ -407,7 +407,13 @@ test('PostgreSQL student writes create, rename and soft-delete with PII-minimal 
             body: JSON.stringify({ name: 'Updated', surname: 'Synthetic' })
         });
         assert.equal(updated.status, 200, JSON.stringify(updated.data));
-        assert.equal(updated.data.name, 'Updated');
+        assert.deepEqual(Object.keys(updated.data).sort(), ['id','classId','gradeId'].sort());
+        const storedUpdate = await fixture.pool.query(
+            'SELECT name,surname FROM student WHERE id=$1 AND tenant_code=$2',
+            [studentId, tenant]
+        );
+        assert.equal(storedUpdate.rows[0].name, 'Updated');
+        assert.equal(storedUpdate.rows[0].surname, 'Synthetic');
         const softDeleted = await api('/students/' + studentId, {
             method: 'DELETE', headers: { ...adminHeaders, 'Idempotency-Key': randomUUID() }
         });
@@ -425,6 +431,10 @@ test('PostgreSQL student writes create, rename and soft-delete with PII-minimal 
         assert.ok(events.rows.every(r => Object.keys(r.payload).length === 4));
     } finally {
         if (studentId) {
+            await fixture.pool.query(
+                "DELETE FROM student_write_idempotency WHERE tenant_code=$1 AND response_body->>'id'=$2",
+                [tenant, studentId]
+            );
             await fixture.pool.query(
                 'DELETE FROM local_events WHERE aggregate_type=$1 AND aggregate_id=$2 AND tenant_code=$3',
                 ['Student', studentId, tenant]
